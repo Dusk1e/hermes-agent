@@ -4559,12 +4559,13 @@ class GatewayRunner:
 
     async def _handle_yolo_command(self, event: MessageEvent) -> str:
         """Handle /yolo — toggle dangerous command approval bypass."""
-        current = bool(os.environ.get("HERMES_YOLO_MODE"))
+        from hermes_constants import get_session_env, set_session_env
+        current = bool(get_session_env("HERMES_YOLO_MODE"))
         if current:
-            os.environ.pop("HERMES_YOLO_MODE", None)
+            set_session_env("HERMES_YOLO_MODE", None)
             return "⚠️ YOLO mode **OFF** — dangerous commands will require approval."
         else:
-            os.environ["HERMES_YOLO_MODE"] = "1"
+            set_session_env("HERMES_YOLO_MODE", "1")
             return "⚡ YOLO mode **ON** — all commands auto-approved. Use with caution."
 
     async def _handle_verbose_command(self, event: MessageEvent) -> str:
@@ -5557,18 +5558,18 @@ class GatewayRunner:
 
     def _set_session_env(self, context: SessionContext) -> None:
         """Set environment variables for the current session."""
-        os.environ["HERMES_SESSION_PLATFORM"] = context.source.platform.value
-        os.environ["HERMES_SESSION_CHAT_ID"] = context.source.chat_id
+        from hermes_constants import set_session_env
+        set_session_env("HERMES_SESSION_PLATFORM", context.source.platform.value)
+        set_session_env("HERMES_SESSION_CHAT_ID", context.source.chat_id)
         if context.source.chat_name:
-            os.environ["HERMES_SESSION_CHAT_NAME"] = context.source.chat_name
+            set_session_env("HERMES_SESSION_CHAT_NAME", context.source.chat_name)
         if context.source.thread_id:
-            os.environ["HERMES_SESSION_THREAD_ID"] = str(context.source.thread_id)
+            set_session_env("HERMES_SESSION_THREAD_ID", str(context.source.thread_id))
     
     def _clear_session_env(self) -> None:
         """Clear session environment variables."""
-        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID"]:
-            if var in os.environ:
-                del os.environ[var]
+        from hermes_constants import clear_session_env
+        clear_session_env()
     
     async def _enrich_message_with_vision(
         self,
@@ -6163,7 +6164,8 @@ class GatewayRunner:
         def run_sync():
             # Pass session_key to process registry via env var so background
             # processes can be mapped back to this gateway session
-            os.environ["HERMES_SESSION_KEY"] = session_key or ""
+            from hermes_constants import set_session_env
+            set_session_env("HERMES_SESSION_KEY", session_key or "")
 
             # Read from env var or use default (same as CLI)
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))

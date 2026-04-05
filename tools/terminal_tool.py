@@ -1220,9 +1220,10 @@ def terminal_tool(
                         result_data["check_interval_note"] = (
                             f"Requested {check_interval}s raised to minimum 30s"
                         )
-                    watcher_platform = os.getenv("HERMES_SESSION_PLATFORM", "")
-                    watcher_chat_id = os.getenv("HERMES_SESSION_CHAT_ID", "")
-                    watcher_thread_id = os.getenv("HERMES_SESSION_THREAD_ID", "")
+                    from hermes_constants import get_session_env
+                    watcher_platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+                    watcher_chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+                    watcher_thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "")
 
                     # Store on session for checkpoint persistence
                     proc_session.watcher_platform = watcher_platform

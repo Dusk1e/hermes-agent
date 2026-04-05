@@ -103,3 +103,54 @@ AI_GATEWAY_CHAT_URL = f"{AI_GATEWAY_BASE_URL}/chat/completions"
 
 NOUS_API_BASE_URL = "https://inference-api.nousresearch.com/v1"
 NOUS_API_CHAT_URL = f"{NOUS_API_BASE_URL}/chat/completions"
+
+import contextvars
+
+# Thread-safe context variables for session state
+_SESSION_PLATFORM = contextvars.ContextVar("HERMES_SESSION_PLATFORM", default="")
+_SESSION_CHAT_ID = contextvars.ContextVar("HERMES_SESSION_CHAT_ID", default="")
+_SESSION_CHAT_NAME = contextvars.ContextVar("HERMES_SESSION_CHAT_NAME", default="")
+_SESSION_THREAD_ID = contextvars.ContextVar("HERMES_SESSION_THREAD_ID", default="")
+_SESSION_KEY = contextvars.ContextVar("HERMES_SESSION_KEY", default="")
+_YOLO_MODE = contextvars.ContextVar("HERMES_YOLO_MODE", default="")
+_CRON_AUTO_DELIVER_PLATFORM = contextvars.ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", default="")
+_CRON_AUTO_DELIVER_CHAT_ID = contextvars.ContextVar("HERMES_CRON_AUTO_DELIVER_CHAT_ID", default="")
+_CRON_AUTO_DELIVER_THREAD_ID = contextvars.ContextVar("HERMES_CRON_AUTO_DELIVER_THREAD_ID", default="")
+
+_CONTEXT_VAR_MAP = {
+    "HERMES_SESSION_PLATFORM": _SESSION_PLATFORM,
+    "HERMES_SESSION_CHAT_ID": _SESSION_CHAT_ID,
+    "HERMES_SESSION_CHAT_NAME": _SESSION_CHAT_NAME,
+    "HERMES_SESSION_THREAD_ID": _SESSION_THREAD_ID,
+    "HERMES_SESSION_KEY": _SESSION_KEY,
+    "HERMES_YOLO_MODE": _YOLO_MODE,
+    "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
+    "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
+    "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
+}
+
+def get_session_env(key: str, default=None):
+    """Get a session env var from contextvars, falling back to os.environ for CLI/tests."""
+    if key in _CONTEXT_VAR_MAP:
+        val = _CONTEXT_VAR_MAP[key].get()
+        if val:
+            return val
+    return os.environ.get(key, default)
+
+def set_session_env(key: str, value: str):
+    """Set a session env var in contextvars only (does not pollute global os.environ)."""
+    if key in _CONTEXT_VAR_MAP:
+        if value is None:
+            _CONTEXT_VAR_MAP[key].set("")
+        else:
+            _CONTEXT_VAR_MAP[key].set(str(value))
+    else:
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = str(value)
+            
+def clear_session_env():
+    """Clear all session contextvars."""
+    for cvar in _CONTEXT_VAR_MAP.values():
+        cvar.set("")

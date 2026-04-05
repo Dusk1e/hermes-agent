@@ -44,7 +44,8 @@ def get_current_session_key(default: str = "default") -> str:
     session_key = _approval_session_key.get()
     if session_key:
         return session_key
-    return os.getenv("HERMES_SESSION_KEY", default)
+    from hermes_constants import get_session_env
+    return get_session_env("HERMES_SESSION_KEY", default)
 
 # Sensitive write targets that should trigger approval even when referenced
 # via shell expansions like $HOME or $HERMES_HOME.
@@ -555,7 +556,8 @@ def check_dangerous_command(command: str, env_type: str,
         return {"approved": True, "message": None}
 
     # --yolo: bypass all approval prompts
-    if os.getenv("HERMES_YOLO_MODE"):
+    from hermes_constants import get_session_env
+    if get_session_env("HERMES_YOLO_MODE"):
         return {"approved": True, "message": None}
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
@@ -657,7 +659,8 @@ def check_all_command_guards(command: str, env_type: str,
 
     # --yolo or approvals.mode=off: bypass all approval prompts
     approval_mode = _get_approval_mode()
-    if os.getenv("HERMES_YOLO_MODE") or approval_mode == "off":
+    from hermes_constants import get_session_env
+    if get_session_env("HERMES_YOLO_MODE") or approval_mode == "off":
         return {"approved": True, "message": None}
 
     is_cli = os.getenv("HERMES_INTERACTIVE")

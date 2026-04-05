@@ -490,9 +490,10 @@ def build_skills_system_prompt(
     # ── Layer 1: in-process LRU cache ─────────────────────────────────
     # Include the resolved platform so per-platform disabled-skill lists
     # produce distinct cache entries (gateway serves multiple platforms).
+    from hermes_constants import get_session_env
     _platform_hint = (
-        os.environ.get("HERMES_PLATFORM")
-        or os.environ.get("HERMES_SESSION_PLATFORM")
+        get_session_env("HERMES_PLATFORM")
+        or get_session_env("HERMES_SESSION_PLATFORM")
         or ""
     )
     cache_key = (

@@ -411,10 +411,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
     # Inject origin context so the agent's send_message tool knows the chat
     if origin:
-        os.environ["HERMES_SESSION_PLATFORM"] = origin["platform"]
-        os.environ["HERMES_SESSION_CHAT_ID"] = str(origin["chat_id"])
+        from hermes_constants import set_session_env
+        set_session_env("HERMES_SESSION_PLATFORM", origin["platform"])
+        set_session_env("HERMES_SESSION_CHAT_ID", str(origin["chat_id"]))
         if origin.get("chat_name"):
-            os.environ["HERMES_SESSION_CHAT_NAME"] = origin["chat_name"]
+            set_session_env("HERMES_SESSION_CHAT_NAME", origin["chat_name"])
 
     try:
         # Re-read .env and config.yaml fresh every run so provider/key
@@ -427,10 +428,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:
-            os.environ["HERMES_CRON_AUTO_DELIVER_PLATFORM"] = delivery_target["platform"]
-            os.environ["HERMES_CRON_AUTO_DELIVER_CHAT_ID"] = str(delivery_target["chat_id"])
+            from hermes_constants import set_session_env
+            set_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM", delivery_target["platform"])
+            set_session_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID", str(delivery_target["chat_id"]))
             if delivery_target.get("thread_id") is not None:
-                os.environ["HERMES_CRON_AUTO_DELIVER_THREAD_ID"] = str(delivery_target["thread_id"])
+                set_session_env("HERMES_CRON_AUTO_DELIVER_THREAD_ID", str(delivery_target["thread_id"]))
 
         model = job.get("model") or os.getenv("HERMES_MODEL") or ""
 
@@ -609,15 +611,8 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
     finally:
         # Clean up injected env vars so they don't leak to other jobs
-        for key in (
-            "HERMES_SESSION_PLATFORM",
-            "HERMES_SESSION_CHAT_ID",
-            "HERMES_SESSION_CHAT_NAME",
-            "HERMES_CRON_AUTO_DELIVER_PLATFORM",
-            "HERMES_CRON_AUTO_DELIVER_CHAT_ID",
-            "HERMES_CRON_AUTO_DELIVER_THREAD_ID",
-        ):
-            os.environ.pop(key, None)
+        from hermes_constants import clear_session_env
+        clear_session_env()
         if _session_db:
             try:
                 _session_db.end_session(_cron_session_id, "cron_complete")
