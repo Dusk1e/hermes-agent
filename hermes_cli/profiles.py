@@ -137,9 +137,14 @@ def _get_wrapper_dir() -> Path:
     return Path.home() / ".local" / "bin"
 
 
+def _is_windows() -> bool:
+    """Return True when wrapper behavior should follow Windows conventions."""
+    return os.name == "nt"
+
+
 def _get_wrapper_path(name: str) -> Path:
     """Return the platform-specific wrapper path for a profile alias."""
-    suffix = ".cmd" if os.name == "nt" else ""
+    suffix = ".cmd" if _is_windows() else ""
     return _get_wrapper_dir() / f"{name}{suffix}"
 
 
@@ -227,7 +232,7 @@ def create_wrapper_script(name: str) -> Optional[Path]:
 
     wrapper_path = _get_wrapper_path(name)
     try:
-        if os.name == "nt":
+        if _is_windows():
             wrapper_path.write_text(f"@echo off\nhermes -p {name} %*\n")
         else:
             wrapper_path.write_text(f'#!/bin/sh\nexec hermes -p {name} "$@"\n')

@@ -364,7 +364,7 @@ class TestWindowsWrappers:
     """Windows-specific alias wrapper behavior."""
 
     def test_create_wrapper_script_uses_cmd_on_windows(self, profile_env, monkeypatch):
-        monkeypatch.setattr(profiles_mod.os, "name", "nt")
+        monkeypatch.setattr(profiles_mod, "_is_windows", lambda: True)
 
         wrapper = create_wrapper_script("coder")
 
@@ -372,14 +372,14 @@ class TestWindowsWrappers:
         assert wrapper.read_text() == "@echo off\nhermes -p coder %*\n"
 
     def test_check_alias_collision_allows_existing_windows_wrapper(self, profile_env, monkeypatch):
-        monkeypatch.setattr(profiles_mod.os, "name", "nt")
+        monkeypatch.setattr(profiles_mod, "_is_windows", lambda: True)
         wrapper = create_wrapper_script("coder")
         monkeypatch.setattr(profiles_mod.shutil, "which", lambda _: str(wrapper))
 
         assert check_alias_collision("coder") is None
 
     def test_list_profiles_detects_windows_wrapper_alias(self, profile_env, monkeypatch):
-        monkeypatch.setattr(profiles_mod.os, "name", "nt")
+        monkeypatch.setattr(profiles_mod, "_is_windows", lambda: True)
         create_profile("coder", no_alias=True)
         wrapper = create_wrapper_script("coder")
 
