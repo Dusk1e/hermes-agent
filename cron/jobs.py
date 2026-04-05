@@ -11,7 +11,10 @@ import logging
 import tempfile
 import os
 import re
+import threading
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from hermes_constants import get_hermes_home
@@ -27,6 +30,17 @@ try:
 except ImportError:
     HAS_CRONITER = False
 
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
+else:
+    msvcrt = None
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -36,6 +50,68 @@ CRON_DIR = HERMES_DIR / "cron"
 JOBS_FILE = CRON_DIR / "jobs.json"
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
+_JOBS_LOCK_TIMEOUT_SECONDS = 10.0
+_jobs_lock_holder = threading.local()
+
+
+def _jobs_lock_path() -> Path:
+    return CRON_DIR / ".jobs.lock"
+
+
+@contextmanager
+def _jobs_store_lock(timeout_seconds: float = _JOBS_LOCK_TIMEOUT_SECONDS):
+    """Cross-process advisory lock for jobs.json read-modify-write sequences."""
+    if getattr(_jobs_lock_holder, "depth", 0) > 0:
+        _jobs_lock_holder.depth += 1
+        try:
+            yield
+        finally:
+            _jobs_lock_holder.depth -= 1
+        return
+
+    ensure_dirs()
+    lock_path = _jobs_lock_path()
+
+    if fcntl is None and msvcrt is None:
+        _jobs_lock_holder.depth = 1
+        try:
+            yield
+        finally:
+            _jobs_lock_holder.depth = 0
+        return
+
+    # On Windows, msvcrt.locking needs a byte to lock and the cursor at 0.
+    if msvcrt and (not lock_path.exists() or lock_path.stat().st_size == 0):
+        lock_path.write_text(" ", encoding="utf-8")
+
+    with lock_path.open("r+" if msvcrt else "a+") as lock_file:
+        deadline = time.time() + max(1.0, timeout_seconds)
+        while True:
+            try:
+                if fcntl:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except (BlockingIOError, OSError, PermissionError):
+                if time.time() >= deadline:
+                    raise TimeoutError("Timed out waiting for cron jobs lock")
+                time.sleep(0.05)
+
+        _jobs_lock_holder.depth = 1
+        try:
+            yield
+        finally:
+            _jobs_lock_holder.depth = 0
+            if fcntl:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif msvcrt:
+                try:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                except (OSError, IOError):
+                    pass
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
@@ -319,48 +395,50 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 
 def load_jobs() -> List[Dict[str, Any]]:
     """Load all jobs from storage."""
-    ensure_dirs()
-    if not JOBS_FILE.exists():
-        return []
-    
-    try:
-        with open(JOBS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return data.get("jobs", [])
-    except json.JSONDecodeError:
-        # Retry with strict=False to handle bare control chars in string values
+    with _jobs_store_lock():
+        ensure_dirs()
+        if not JOBS_FILE.exists():
+            return []
+
         try:
             with open(JOBS_FILE, 'r', encoding='utf-8') as f:
-                data = json.loads(f.read(), strict=False)
-                jobs = data.get("jobs", [])
-                if jobs:
-                    # Auto-repair: rewrite with proper escaping
-                    save_jobs(jobs)
-                    logger.warning("Auto-repaired jobs.json (had invalid control characters)")
-                return jobs
-        except Exception:
+                data = json.load(f)
+                return data.get("jobs", [])
+        except json.JSONDecodeError:
+            # Retry with strict=False to handle bare control chars in string values
+            try:
+                with open(JOBS_FILE, 'r', encoding='utf-8') as f:
+                    data = json.loads(f.read(), strict=False)
+                    jobs = data.get("jobs", [])
+                    if jobs:
+                        # Auto-repair: rewrite with proper escaping
+                        save_jobs(jobs)
+                        logger.warning("Auto-repaired jobs.json (had invalid control characters)")
+                    return jobs
+            except Exception:
+                return []
+        except IOError:
             return []
-    except IOError:
-        return []
 
 
 def save_jobs(jobs: List[Dict[str, Any]]):
     """Save all jobs to storage."""
-    ensure_dirs()
-    fd, tmp_path = tempfile.mkstemp(dir=str(JOBS_FILE.parent), suffix='.tmp', prefix='.jobs_')
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump({"jobs": jobs, "updated_at": _hermes_now().isoformat()}, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, JOBS_FILE)
-        _secure_file(JOBS_FILE)
-    except BaseException:
+    with _jobs_store_lock():
+        ensure_dirs()
+        fd, tmp_path = tempfile.mkstemp(dir=str(JOBS_FILE.parent), suffix='.tmp', prefix='.jobs_')
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump({"jobs": jobs, "updated_at": _hermes_now().isoformat()}, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, JOBS_FILE)
+            _secure_file(JOBS_FILE)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def create_job(
@@ -457,61 +535,65 @@ def create_job(
         "origin": origin,  # Tracks where job was created for "origin" delivery
     }
 
-    jobs = load_jobs()
-    jobs.append(job)
-    save_jobs(jobs)
+    with _jobs_store_lock():
+        jobs = load_jobs()
+        jobs.append(job)
+        save_jobs(jobs)
 
     return job
 
 
 def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     """Get a job by ID."""
-    jobs = load_jobs()
-    for job in jobs:
-        if job["id"] == job_id:
-            return _apply_skill_fields(job)
-    return None
+    with _jobs_store_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if job["id"] == job_id:
+                return _apply_skill_fields(job)
+        return None
 
 
 def list_jobs(include_disabled: bool = False) -> List[Dict[str, Any]]:
     """List all jobs, optionally including disabled ones."""
-    jobs = [_apply_skill_fields(j) for j in load_jobs()]
-    if not include_disabled:
-        jobs = [j for j in jobs if j.get("enabled", True)]
-    return jobs
+    with _jobs_store_lock():
+        jobs = [_apply_skill_fields(j) for j in load_jobs()]
+        if not include_disabled:
+            jobs = [j for j in jobs if j.get("enabled", True)]
+        return jobs
 
 
 def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Update a job by ID, refreshing derived schedule fields when needed."""
-    jobs = load_jobs()
-    for i, job in enumerate(jobs):
-        if job["id"] != job_id:
-            continue
+    with _jobs_store_lock():
+        jobs = load_jobs()
+        for i, job in enumerate(jobs):
+            if job["id"] != job_id:
+                continue
 
-        updated = _apply_skill_fields({**job, **updates})
-        schedule_changed = "schedule" in updates
+            updated = _apply_skill_fields({**job, **updates})
+            schedule_changed = "schedule" in updates
 
-        if "skills" in updates or "skill" in updates:
-            normalized_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
-            updated["skills"] = normalized_skills
-            updated["skill"] = normalized_skills[0] if normalized_skills else None
+            if "skills" in updates or "skill" in updates:
+                normalized_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
+                updated["skills"] = normalized_skills
+                updated["skill"] = normalized_skills[0] if normalized_skills else None
 
-        if schedule_changed:
-            updated_schedule = updated["schedule"]
-            updated["schedule_display"] = updates.get(
-                "schedule_display",
-                updated_schedule.get("display", updated.get("schedule_display")),
-            )
-            if updated.get("state") != "paused":
-                updated["next_run_at"] = compute_next_run(updated_schedule)
+            if schedule_changed:
+                updated_schedule = updated["schedule"]
+                updated["schedule_display"] = updates.get(
+                    "schedule_display",
+                    updated_schedule.get("display", updated.get("schedule_display")),
+                )
+                if updated.get("state") != "paused":
+                    updated["next_run_at"] = compute_next_run(updated_schedule)
 
-        if updated.get("enabled", True) and updated.get("state") != "paused" and not updated.get("next_run_at"):
-            updated["next_run_at"] = compute_next_run(updated["schedule"])
+            if updated.get("enabled", True) and updated.get("state") != "paused" and not updated.get("next_run_at"):
+                updated["next_run_at"] = compute_next_run(updated["schedule"])
 
-        jobs[i] = updated
-        save_jobs(jobs)
-        return _apply_skill_fields(jobs[i])
-    return None
+            jobs[i] = updated
+            save_jobs(jobs)
+            return _apply_skill_fields(jobs[i])
+        return None
 
 
 def pause_job(job_id: str, reason: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -565,13 +647,14 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
 
 def remove_job(job_id: str) -> bool:
     """Remove a job by ID."""
-    jobs = load_jobs()
-    original_len = len(jobs)
-    jobs = [j for j in jobs if j["id"] != job_id]
-    if len(jobs) < original_len:
-        save_jobs(jobs)
-        return True
-    return False
+    with _jobs_store_lock():
+        jobs = load_jobs()
+        original_len = len(jobs)
+        jobs = [j for j in jobs if j["id"] != job_id]
+        if len(jobs) < original_len:
+            save_jobs(jobs)
+            return True
+        return False
 
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None):
@@ -581,41 +664,42 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None):
     Updates last_run_at, last_status, increments completed count,
     computes next_run_at, and auto-deletes if repeat limit reached.
     """
-    jobs = load_jobs()
-    for i, job in enumerate(jobs):
-        if job["id"] == job_id:
-            now = _hermes_now().isoformat()
-            job["last_run_at"] = now
-            job["last_status"] = "ok" if success else "error"
-            job["last_error"] = error if not success else None
-            
-            # Increment completed count
-            if job.get("repeat"):
-                job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1
-                
-                # Check if we've hit the repeat limit
-                times = job["repeat"].get("times")
-                completed = job["repeat"]["completed"]
-                if times is not None and times > 0 and completed >= times:
-                    # Remove the job (limit reached)
-                    jobs.pop(i)
-                    save_jobs(jobs)
-                    return
-            
-            # Compute next run
-            job["next_run_at"] = compute_next_run(job["schedule"], now)
+    with _jobs_store_lock():
+        jobs = load_jobs()
+        for i, job in enumerate(jobs):
+            if job["id"] == job_id:
+                now = _hermes_now().isoformat()
+                job["last_run_at"] = now
+                job["last_status"] = "ok" if success else "error"
+                job["last_error"] = error if not success else None
 
-            # If no next run (one-shot completed), disable
-            if job["next_run_at"] is None:
-                job["enabled"] = False
-                job["state"] = "completed"
-            elif job.get("state") != "paused":
-                job["state"] = "scheduled"
+                # Increment completed count
+                if job.get("repeat"):
+                    job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1
 
-            save_jobs(jobs)
-            return
-    
-    save_jobs(jobs)
+                    # Check if we've hit the repeat limit
+                    times = job["repeat"].get("times")
+                    completed = job["repeat"]["completed"]
+                    if times is not None and times > 0 and completed >= times:
+                        # Remove the job (limit reached)
+                        jobs.pop(i)
+                        save_jobs(jobs)
+                        return
+
+                # Compute next run
+                job["next_run_at"] = compute_next_run(job["schedule"], now)
+
+                # If no next run (one-shot completed), disable
+                if job["next_run_at"] is None:
+                    job["enabled"] = False
+                    job["state"] = "completed"
+                elif job.get("state") != "paused":
+                    job["state"] = "scheduled"
+
+                save_jobs(jobs)
+                return
+
+        save_jobs(jobs)
 
 
 def advance_next_run(job_id: str) -> bool:
@@ -630,23 +714,24 @@ def advance_next_run(job_id: str) -> bool:
 
     Returns True if next_run_at was advanced, False otherwise.
     """
-    jobs = load_jobs()
-    for job in jobs:
-        if job["id"] == job_id:
-            kind = job.get("schedule", {}).get("kind")
-            if kind not in ("cron", "interval"):
+    with _jobs_store_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if job["id"] == job_id:
+                kind = job.get("schedule", {}).get("kind")
+                if kind not in ("cron", "interval"):
+                    return False
+                now = _hermes_now().isoformat()
+                new_next = compute_next_run(job["schedule"], now)
+                if new_next and new_next != job.get("next_run_at"):
+                    job["next_run_at"] = new_next
+                    save_jobs(jobs)
+                    return True
                 return False
-            now = _hermes_now().isoformat()
-            new_next = compute_next_run(job["schedule"], now)
-            if new_next and new_next != job.get("next_run_at"):
-                job["next_run_at"] = new_next
-                save_jobs(jobs)
-                return True
-            return False
-    return False
+        return False
 
 
-def get_due_jobs() -> List[Dict[str, Any]]:
+def _get_due_jobs_unlocked() -> List[Dict[str, Any]]:
     """Get all jobs that are due to run now.
 
     For recurring jobs (cron/interval), if the scheduled time is stale
@@ -723,6 +808,12 @@ def get_due_jobs() -> List[Dict[str, Any]]:
         save_jobs(raw_jobs)
 
     return due
+
+
+def get_due_jobs() -> List[Dict[str, Any]]:
+    """Get all jobs that are due to run now under the jobs store lock."""
+    with _jobs_store_lock():
+        return _get_due_jobs_unlocked()
 
 
 def save_job_output(job_id: str, output: str):

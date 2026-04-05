@@ -1,10 +1,13 @@
 """Tests for cron/jobs.py — schedule parsing, job CRUD, and due-job detection."""
 
 import json
+import threading
 import pytest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+import cron.jobs as jobs_module
 
 from cron.jobs import (
     parse_duration,
@@ -338,6 +341,53 @@ class TestMarkJobRun:
         updated = get_job(job["id"])
         assert updated["last_status"] == "error"
         assert updated["last_error"] == "timeout"
+
+    def test_concurrent_create_is_not_lost_during_mark_job_run(self, tmp_cron_dir, monkeypatch):
+        existing = create_job(prompt="Existing", schedule="every 1h")
+
+        original_save_jobs = jobs_module.save_jobs
+        mark_waiting_to_save = threading.Event()
+        allow_mark_to_continue = threading.Event()
+        create_attempted_save = threading.Event()
+        created_job = {}
+
+        def controlled_save(jobs):
+            thread_name = threading.current_thread().name
+            if thread_name == "mark-thread":
+                mark_waiting_to_save.set()
+                assert allow_mark_to_continue.wait(timeout=2), "mark thread never resumed"
+            elif thread_name == "create-thread":
+                create_attempted_save.set()
+            return original_save_jobs(jobs)
+
+        monkeypatch.setattr(jobs_module, "save_jobs", controlled_save)
+
+        def run_mark():
+            jobs_module.mark_job_run(existing["id"], success=True)
+
+        def run_create():
+            created_job["job"] = jobs_module.create_job(prompt="Concurrent", schedule="every 2h")
+
+        mark_thread = threading.Thread(target=run_mark, name="mark-thread")
+        create_thread = threading.Thread(target=run_create, name="create-thread")
+
+        mark_thread.start()
+        assert mark_waiting_to_save.wait(timeout=2), "mark thread never reached save_jobs"
+
+        create_thread.start()
+        create_attempted_save.wait(timeout=0.5)
+        allow_mark_to_continue.set()
+
+        mark_thread.join(timeout=2)
+        create_thread.join(timeout=2)
+
+        assert not mark_thread.is_alive()
+        assert not create_thread.is_alive()
+
+        jobs = list_jobs(include_disabled=True)
+        ids = {job["id"] for job in jobs}
+        assert existing["id"] in ids
+        assert created_job["job"]["id"] in ids
 
 
 class TestAdvanceNextRun:
