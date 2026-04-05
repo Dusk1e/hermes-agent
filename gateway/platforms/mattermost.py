@@ -21,6 +21,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -48,6 +49,29 @@ _CHANNEL_TYPE_MAP = {
 _RECONNECT_BASE_DELAY = 2.0
 _RECONNECT_MAX_DELAY = 60.0
 _RECONNECT_JITTER = 0.2
+
+
+def _redact_logged_url(url: str) -> str:
+    """Mask URL credentials and query strings before writing them to logs."""
+    if not url:
+        return url
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+
+    netloc = parts.netloc
+    if "@" in netloc:
+        credentials, host = netloc.rsplit("@", 1)
+        if ":" in credentials:
+            username, _password = credentials.split(":", 1)
+            netloc = f"{username}:***@{host}"
+        else:
+            netloc = f"***@{host}"
+
+    query = "[redacted]" if parts.query else ""
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
 
 
 def check_mattermost_requirements() -> bool:
@@ -414,6 +438,7 @@ class MattermostAdapter(BasePlatformAdapter):
         file_data = None
         ct = "application/octet-stream"
         fname = url.rsplit("/", 1)[-1].split("?")[0] or f"{kind}.png"
+        safe_url = _redact_logged_url(url)
 
         for attempt in range(3):
             try:
@@ -421,7 +446,7 @@ class MattermostAdapter(BasePlatformAdapter):
                     if resp.status >= 500 or resp.status == 429:
                         if attempt < 2:
                             logger.debug("Mattermost download retry %d/2 for %s (status %d)",
-                                         attempt + 1, url[:80], resp.status)
+                                         attempt + 1, safe_url[:80], resp.status)
                             await asyncio.sleep(1.5 * (attempt + 1))
                             continue
                     if resp.status >= 400:
@@ -434,11 +459,11 @@ class MattermostAdapter(BasePlatformAdapter):
                 if attempt < 2:
                     await asyncio.sleep(1.5 * (attempt + 1))
                     continue
-                logger.warning("Mattermost: failed to download %s after %d attempts: %s", url, attempt + 1, exc)
+                logger.warning("Mattermost: failed to download %s after %d attempts: %s", safe_url, attempt + 1, exc)
                 return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
 
         if file_data is None:
-            logger.warning("Mattermost: download returned no data for %s", url)
+            logger.warning("Mattermost: download returned no data for %s", safe_url)
             return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
 
         file_id = await self._upload_file(chat_id, file_data, fname, ct)

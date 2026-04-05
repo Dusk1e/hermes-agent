@@ -12,6 +12,7 @@ in this environment.
 """
 
 import asyncio
+import logging
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -698,6 +699,36 @@ class TestMattermostSendUrlAsFile:
         adapter.send.assert_called_once()
         text_arg = adapter.send.call_args[0][1]
         assert "http://cdn.example.com/img.png" in text_arg
+
+    def test_redacts_query_tokens_in_failure_logs(self, caplog):
+        """Download failure logs should not expose auth-bearing query strings."""
+        import aiohttp
+
+        adapter = _make_mm_adapter()
+        secret_url = (
+            "https://cdn.example.com/private.png"
+            "?token=super-secret-token&expires=123"
+        )
+
+        error_resp = MagicMock()
+        error_resp.__aenter__ = AsyncMock(
+            side_effect=aiohttp.ClientConnectionError("connection refused")
+        )
+        error_resp.__aexit__ = AsyncMock(return_value=False)
+        adapter._session.get = MagicMock(return_value=error_resp)
+
+        async def run():
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                return await adapter._send_url_as_file(
+                    "C123", secret_url, None, None
+                )
+
+        with caplog.at_level(logging.WARNING, logger="gateway.platforms.mattermost"):
+            asyncio.run(run())
+
+        assert "super-secret-token" not in caplog.text
+        assert "token=" not in caplog.text
+        assert "https://cdn.example.com/private.png?[redacted]" in caplog.text
 
     def test_non_retryable_404_falls_back_immediately(self):
         """404 is non-retryable (< 500, != 429); send() is called right away."""
