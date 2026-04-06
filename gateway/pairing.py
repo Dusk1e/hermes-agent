@@ -21,11 +21,24 @@ Storage: ~/.hermes/pairing/
 import json
 import os
 import secrets
+import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
 from hermes_constants import get_hermes_dir
+
+try:
+    import fcntl
+except (ImportError, NotImplementedError):
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 
 # Unambiguous alphabet -- excludes 0/O, 1/I to prevent confusion
@@ -42,16 +55,98 @@ MAX_PENDING_PER_PLATFORM = 3        # Max pending codes per platform
 MAX_FAILED_ATTEMPTS = 5             # Failed approvals before lockout
 
 PAIRING_DIR = get_hermes_dir("platforms/pairing", "pairing")
+PAIRING_LOCK_TIMEOUT_SECONDS = 10.0
+
+_pairing_lock_holder = threading.local()
+
+
+def _pairing_lock_path() -> Path:
+    return PAIRING_DIR / ".pairing.lock"
+
+
+@contextmanager
+def _pairing_store_lock(timeout_seconds: float = PAIRING_LOCK_TIMEOUT_SECONDS):
+    """Cross-process advisory lock for pairing state reads+writes. Reentrant."""
+    if getattr(_pairing_lock_holder, "depth", 0) > 0:
+        _pairing_lock_holder.depth += 1
+        try:
+            yield
+        finally:
+            _pairing_lock_holder.depth -= 1
+        return
+
+    lock_path = _pairing_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if fcntl is None and msvcrt is None:
+        _pairing_lock_holder.depth = 1
+        try:
+            yield
+        finally:
+            _pairing_lock_holder.depth = 0
+        return
+
+    if msvcrt and (not lock_path.exists() or lock_path.stat().st_size == 0):
+        lock_path.write_text(" ", encoding="utf-8")
+
+    with lock_path.open("r+" if msvcrt else "a+", encoding="utf-8") as lock_file:
+        deadline = time.time() + max(1.0, timeout_seconds)
+        while True:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except (BlockingIOError, OSError, PermissionError):
+                if time.time() >= deadline:
+                    raise TimeoutError("Timed out waiting for pairing store lock")
+                time.sleep(0.05)
+
+        _pairing_lock_holder.depth = 1
+        try:
+            yield
+        finally:
+            _pairing_lock_holder.depth = 0
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                try:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                except (OSError, IOError):
+                    pass
 
 
 def _secure_write(path: Path, data: str) -> None:
     """Write data to file with restrictive permissions (owner read/write only)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(data, encoding="utf-8")
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f".{path.stem}_",
+        suffix=".tmp",
+    )
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass  # Windows doesn't support chmod the same way
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp_path, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass  # Windows doesn't support chmod the same way
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 class PairingStore:
@@ -77,51 +172,57 @@ class PairingStore:
         return PAIRING_DIR / "_rate_limits.json"
 
     def _load_json(self, path: Path) -> dict:
-        if path.exists():
-            try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                return {}
-        return {}
+        with _pairing_store_lock():
+            if path.exists():
+                try:
+                    return json.loads(path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    return {}
+            return {}
 
     def _save_json(self, path: Path, data: dict) -> None:
-        _secure_write(path, json.dumps(data, indent=2, ensure_ascii=False))
+        with _pairing_store_lock():
+            _secure_write(path, json.dumps(data, indent=2, ensure_ascii=False))
 
     # ----- Approved users -----
 
     def is_approved(self, platform: str, user_id: str) -> bool:
         """Check if a user is approved (paired) on a platform."""
-        approved = self._load_json(self._approved_path(platform))
-        return user_id in approved
+        with _pairing_store_lock():
+            approved = self._load_json(self._approved_path(platform))
+            return user_id in approved
 
     def list_approved(self, platform: str = None) -> list:
         """List approved users, optionally filtered by platform."""
-        results = []
-        platforms = [platform] if platform else self._all_platforms("approved")
-        for p in platforms:
-            approved = self._load_json(self._approved_path(p))
-            for uid, info in approved.items():
-                results.append({"platform": p, "user_id": uid, **info})
-        return results
+        with _pairing_store_lock():
+            results = []
+            platforms = [platform] if platform else self._all_platforms("approved")
+            for p in platforms:
+                approved = self._load_json(self._approved_path(p))
+                for uid, info in approved.items():
+                    results.append({"platform": p, "user_id": uid, **info})
+            return results
 
     def _approve_user(self, platform: str, user_id: str, user_name: str = "") -> None:
         """Add a user to the approved list."""
-        approved = self._load_json(self._approved_path(platform))
-        approved[user_id] = {
-            "user_name": user_name,
-            "approved_at": time.time(),
-        }
-        self._save_json(self._approved_path(platform), approved)
+        with _pairing_store_lock():
+            approved = self._load_json(self._approved_path(platform))
+            approved[user_id] = {
+                "user_name": user_name,
+                "approved_at": time.time(),
+            }
+            self._save_json(self._approved_path(platform), approved)
 
     def revoke(self, platform: str, user_id: str) -> bool:
         """Remove a user from the approved list. Returns True if found."""
-        path = self._approved_path(platform)
-        approved = self._load_json(path)
-        if user_id in approved:
-            del approved[user_id]
-            self._save_json(path, approved)
-            return True
-        return False
+        with _pairing_store_lock():
+            path = self._approved_path(platform)
+            approved = self._load_json(path)
+            if user_id in approved:
+                del approved[user_id]
+                self._save_json(path, approved)
+                return True
+            return False
 
     # ----- Pending codes -----
 
@@ -136,36 +237,37 @@ class PairingStore:
           - Max pending codes reached for this platform
           - User/platform is in lockout due to failed attempts
         """
-        self._cleanup_expired(platform)
+        with _pairing_store_lock():
+            self._cleanup_expired(platform)
 
-        # Check lockout
-        if self._is_locked_out(platform):
-            return None
+            # Check lockout
+            if self._is_locked_out(platform):
+                return None
 
-        # Check rate limit for this specific user
-        if self._is_rate_limited(platform, user_id):
-            return None
+            # Check rate limit for this specific user
+            if self._is_rate_limited(platform, user_id):
+                return None
 
-        # Check max pending
-        pending = self._load_json(self._pending_path(platform))
-        if len(pending) >= MAX_PENDING_PER_PLATFORM:
-            return None
+            # Check max pending
+            pending = self._load_json(self._pending_path(platform))
+            if len(pending) >= MAX_PENDING_PER_PLATFORM:
+                return None
 
-        # Generate cryptographically random code
-        code = "".join(secrets.choice(ALPHABET) for _ in range(CODE_LENGTH))
+            # Generate cryptographically random code
+            code = "".join(secrets.choice(ALPHABET) for _ in range(CODE_LENGTH))
 
-        # Store pending request
-        pending[code] = {
-            "user_id": user_id,
-            "user_name": user_name,
-            "created_at": time.time(),
-        }
-        self._save_json(self._pending_path(platform), pending)
+            # Store pending request
+            pending[code] = {
+                "user_id": user_id,
+                "user_name": user_name,
+                "created_at": time.time(),
+            }
+            self._save_json(self._pending_path(platform), pending)
 
-        # Record rate limit
-        self._record_rate_limit(platform, user_id)
+            # Record rate limit
+            self._record_rate_limit(platform, user_id)
 
-        return code
+            return code
 
     def approve_code(self, platform: str, code: str) -> Optional[dict]:
         """
@@ -173,112 +275,121 @@ class PairingStore:
 
         Returns {user_id, user_name} on success, None if code is invalid/expired.
         """
-        self._cleanup_expired(platform)
-        code = code.upper().strip()
+        with _pairing_store_lock():
+            self._cleanup_expired(platform)
+            code = code.upper().strip()
 
-        pending = self._load_json(self._pending_path(platform))
-        if code not in pending:
-            self._record_failed_attempt(platform)
-            return None
+            pending = self._load_json(self._pending_path(platform))
+            if code not in pending:
+                self._record_failed_attempt(platform)
+                return None
 
-        entry = pending.pop(code)
-        self._save_json(self._pending_path(platform), pending)
+            entry = pending.pop(code)
+            self._save_json(self._pending_path(platform), pending)
 
-        # Add to approved list
-        self._approve_user(platform, entry["user_id"], entry.get("user_name", ""))
+            # Add to approved list
+            self._approve_user(platform, entry["user_id"], entry.get("user_name", ""))
 
-        return {
-            "user_id": entry["user_id"],
-            "user_name": entry.get("user_name", ""),
-        }
+            return {
+                "user_id": entry["user_id"],
+                "user_name": entry.get("user_name", ""),
+            }
 
     def list_pending(self, platform: str = None) -> list:
         """List pending pairing requests, optionally filtered by platform."""
-        results = []
-        platforms = [platform] if platform else self._all_platforms("pending")
-        for p in platforms:
-            self._cleanup_expired(p)
-            pending = self._load_json(self._pending_path(p))
-            for code, info in pending.items():
-                age_min = int((time.time() - info["created_at"]) / 60)
-                results.append({
-                    "platform": p,
-                    "code": code,
-                    "user_id": info["user_id"],
-                    "user_name": info.get("user_name", ""),
-                    "age_minutes": age_min,
-                })
-        return results
+        with _pairing_store_lock():
+            results = []
+            platforms = [platform] if platform else self._all_platforms("pending")
+            for p in platforms:
+                self._cleanup_expired(p)
+                pending = self._load_json(self._pending_path(p))
+                for code, info in pending.items():
+                    age_min = int((time.time() - info["created_at"]) / 60)
+                    results.append({
+                        "platform": p,
+                        "code": code,
+                        "user_id": info["user_id"],
+                        "user_name": info.get("user_name", ""),
+                        "age_minutes": age_min,
+                    })
+            return results
 
     def clear_pending(self, platform: str = None) -> int:
         """Clear all pending requests. Returns count removed."""
-        count = 0
-        platforms = [platform] if platform else self._all_platforms("pending")
-        for p in platforms:
-            pending = self._load_json(self._pending_path(p))
-            count += len(pending)
-            self._save_json(self._pending_path(p), {})
-        return count
+        with _pairing_store_lock():
+            count = 0
+            platforms = [platform] if platform else self._all_platforms("pending")
+            for p in platforms:
+                pending = self._load_json(self._pending_path(p))
+                count += len(pending)
+                self._save_json(self._pending_path(p), {})
+            return count
 
     # ----- Rate limiting and lockout -----
 
     def _is_rate_limited(self, platform: str, user_id: str) -> bool:
         """Check if a user has requested a code too recently."""
-        limits = self._load_json(self._rate_limit_path())
-        key = f"{platform}:{user_id}"
-        last_request = limits.get(key, 0)
-        return (time.time() - last_request) < RATE_LIMIT_SECONDS
+        with _pairing_store_lock():
+            limits = self._load_json(self._rate_limit_path())
+            key = f"{platform}:{user_id}"
+            last_request = limits.get(key, 0)
+            return (time.time() - last_request) < RATE_LIMIT_SECONDS
 
     def _record_rate_limit(self, platform: str, user_id: str) -> None:
         """Record the time of a pairing request for rate limiting."""
-        limits = self._load_json(self._rate_limit_path())
-        key = f"{platform}:{user_id}"
-        limits[key] = time.time()
-        self._save_json(self._rate_limit_path(), limits)
+        with _pairing_store_lock():
+            limits = self._load_json(self._rate_limit_path())
+            key = f"{platform}:{user_id}"
+            limits[key] = time.time()
+            self._save_json(self._rate_limit_path(), limits)
 
     def _is_locked_out(self, platform: str) -> bool:
         """Check if a platform is in lockout due to failed approval attempts."""
-        limits = self._load_json(self._rate_limit_path())
-        lockout_key = f"_lockout:{platform}"
-        lockout_until = limits.get(lockout_key, 0)
-        return time.time() < lockout_until
+        with _pairing_store_lock():
+            limits = self._load_json(self._rate_limit_path())
+            lockout_key = f"_lockout:{platform}"
+            lockout_until = limits.get(lockout_key, 0)
+            return time.time() < lockout_until
 
     def _record_failed_attempt(self, platform: str) -> None:
         """Record a failed approval attempt. Triggers lockout after MAX_FAILED_ATTEMPTS."""
-        limits = self._load_json(self._rate_limit_path())
-        fail_key = f"_failures:{platform}"
-        fails = limits.get(fail_key, 0) + 1
-        limits[fail_key] = fails
-        if fails >= MAX_FAILED_ATTEMPTS:
-            lockout_key = f"_lockout:{platform}"
-            limits[lockout_key] = time.time() + LOCKOUT_SECONDS
-            limits[fail_key] = 0  # Reset counter
-            print(f"[pairing] Platform {platform} locked out for {LOCKOUT_SECONDS}s "
-                  f"after {MAX_FAILED_ATTEMPTS} failed attempts", flush=True)
-        self._save_json(self._rate_limit_path(), limits)
+        with _pairing_store_lock():
+            limits = self._load_json(self._rate_limit_path())
+            fail_key = f"_failures:{platform}"
+            fails = limits.get(fail_key, 0) + 1
+            limits[fail_key] = fails
+            if fails >= MAX_FAILED_ATTEMPTS:
+                lockout_key = f"_lockout:{platform}"
+                limits[lockout_key] = time.time() + LOCKOUT_SECONDS
+                limits[fail_key] = 0  # Reset counter
+                print(f"[pairing] Platform {platform} locked out for {LOCKOUT_SECONDS}s "
+                      f"after {MAX_FAILED_ATTEMPTS} failed attempts", flush=True)
+            self._save_json(self._rate_limit_path(), limits)
 
     # ----- Cleanup -----
 
     def _cleanup_expired(self, platform: str) -> None:
         """Remove expired pending codes."""
-        path = self._pending_path(platform)
-        pending = self._load_json(path)
-        now = time.time()
-        expired = [
-            code for code, info in pending.items()
-            if (now - info["created_at"]) > CODE_TTL_SECONDS
-        ]
-        if expired:
-            for code in expired:
-                del pending[code]
-            self._save_json(path, pending)
+        with _pairing_store_lock():
+            path = self._pending_path(platform)
+            pending = self._load_json(path)
+            now = time.time()
+            expired = [
+                code for code, info in pending.items()
+                if (now - info["created_at"]) > CODE_TTL_SECONDS
+            ]
+            if expired:
+                for code in expired:
+                    del pending[code]
+                self._save_json(path, pending)
 
     def _all_platforms(self, suffix: str) -> list:
         """List all platforms that have data files of a given suffix."""
-        platforms = []
-        for f in PAIRING_DIR.iterdir():
-            if f.name.endswith(f"-{suffix}.json"):
-                platform = f.name.replace(f"-{suffix}.json", "")
-                if not platform.startswith("_"):
-                    platforms.append(platform)
-        return platforms
+        with _pairing_store_lock():
+            platforms = []
+            for f in PAIRING_DIR.iterdir():
+                if f.name.endswith(f"-{suffix}.json"):
+                    platform = f.name.replace(f"-{suffix}.json", "")
+                    if not platform.startswith("_"):
+                        platforms.append(platform)
+            return platforms

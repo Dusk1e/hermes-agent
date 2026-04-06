@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -354,3 +355,91 @@ class TestListAndClear:
             store.generate_code("discord", "user2")
             count = store.clear_pending()
         assert count == 2
+
+
+# ---------------------------------------------------------------------------
+# Concurrency regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentStateUpdates:
+    def test_concurrent_rate_limit_updates_are_not_lost(self, tmp_path):
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path):
+            stores = [PairingStore() for _ in range(8)]
+            start = threading.Event()
+            errors = []
+            original_load_json = PairingStore._load_json
+
+            def delayed_load(self, path):
+                data = original_load_json(self, path)
+                if path.name == "_rate_limits.json":
+                    time.sleep(0.02)
+                return data
+
+            def worker(store, idx):
+                start.wait()
+                try:
+                    store._record_rate_limit("telegram", f"user{idx}")
+                except Exception as exc:  # pragma: no cover - diagnostic
+                    errors.append(exc)
+
+            with patch.object(PairingStore, "_load_json", delayed_load):
+                threads = [
+                    threading.Thread(target=worker, args=(store, idx))
+                    for idx, store in enumerate(stores)
+                ]
+                for thread in threads:
+                    thread.start()
+                start.set()
+                for thread in threads:
+                    thread.join(timeout=5)
+
+        assert not errors
+        assert all(not thread.is_alive() for thread in threads)
+
+        limits = stores[0]._load_json(stores[0]._rate_limit_path())
+        tracked_users = {
+            key for key in limits
+            if key.startswith("telegram:user")
+        }
+        assert tracked_users == {f"telegram:user{idx}" for idx in range(8)}
+
+    def test_concurrent_code_generation_preserves_all_pending_requests(self, tmp_path):
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path):
+            stores = [PairingStore() for _ in range(MAX_PENDING_PER_PLATFORM)]
+            start = threading.Event()
+            errors = []
+            codes = [None] * MAX_PENDING_PER_PLATFORM
+            original_load_json = PairingStore._load_json
+
+            def delayed_load(self, path):
+                data = original_load_json(self, path)
+                if path.name in {"telegram-pending.json", "_rate_limits.json"}:
+                    time.sleep(0.02)
+                return data
+
+            def worker(slot, store):
+                start.wait()
+                try:
+                    codes[slot] = store.generate_code("telegram", f"user{slot}", f"User {slot}")
+                except Exception as exc:  # pragma: no cover - diagnostic
+                    errors.append(exc)
+
+            with patch.object(PairingStore, "_load_json", delayed_load):
+                threads = [
+                    threading.Thread(target=worker, args=(idx, store))
+                    for idx, store in enumerate(stores)
+                ]
+                for thread in threads:
+                    thread.start()
+                start.set()
+                for thread in threads:
+                    thread.join(timeout=5)
+
+        assert not errors
+        assert all(not thread.is_alive() for thread in threads)
+        assert all(isinstance(code, str) and len(code) == CODE_LENGTH for code in codes)
+
+        pending = stores[0].list_pending("telegram")
+        pending_users = {entry["user_id"] for entry in pending}
+        assert pending_users == {f"user{idx}" for idx in range(MAX_PENDING_PER_PLATFORM)}
