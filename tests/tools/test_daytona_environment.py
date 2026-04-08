@@ -321,6 +321,28 @@ class TestExecute:
         assert result["returncode"] == 0
 
 
+class TestSkillAndCredentialSync:
+    def test_upload_if_changed_quotes_remote_parent_path(self, make_env, tmp_path):
+        sb = _make_sandbox()
+        sb.process.exec.side_effect = [
+            _make_exec_response(result="/root"),
+            _make_exec_response(result="", exit_code=0),
+        ]
+        sb.state = "started"
+        env = make_env(sandbox=sb)
+
+        host_file = tmp_path / "credential.txt"
+        host_file.write_text("secret", encoding="utf-8")
+        remote_path = "/root/.hermes/skills/evil; touch /tmp/pwned #/SKILL.md"
+
+        uploaded = env._upload_if_changed(str(host_file), remote_path)
+
+        assert uploaded is True
+        mkdir_cmd = sb.process.exec.call_args_list[-1][0][0]
+        assert mkdir_cmd == "mkdir -p -- '/root/.hermes/skills/evil; touch /tmp/pwned #'"
+        sb.fs.upload_file.assert_called_once_with(str(host_file), remote_path)
+
+
 # ---------------------------------------------------------------------------
 # Resource conversion
 # ---------------------------------------------------------------------------

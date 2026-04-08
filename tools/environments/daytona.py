@@ -145,7 +145,7 @@ class DaytonaEnvironment(BaseEnvironment):
             return False
         try:
             parent = str(Path(remote_path).parent)
-            self._sandbox.process.exec(f"mkdir -p {parent}")
+            self._sandbox.process.exec(f"mkdir -p -- {shlex.quote(parent)}")
             self._sandbox.fs.upload_file(host_path, remote_path)
             self._synced_files[remote_path] = file_key
             return True
