@@ -17,6 +17,7 @@ import pytest
 
 import json
 import os
+import tempfile
 
 os.environ["TERMINAL_ENV"] = "local"
 
@@ -30,6 +31,7 @@ def _force_local_terminal(monkeypatch):
     ensures each test starts (and ends) with the correct value.
     """
     monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("HERMES_ALLOW_UNSAFE_EXECUTE_CODE", "1")
 import sys
 import time
 import threading
@@ -70,7 +72,13 @@ def _mock_handle_function_call(function_name, function_args, task_id=None, user_
 class TestSandboxRequirements(unittest.TestCase):
     def test_available_on_posix(self):
         if sys.platform != "win32":
-            self.assertTrue(check_sandbox_requirements())
+            with patch("tools.terminal_tool._get_env_config", return_value={"env_type": "local"}):
+                self.assertTrue(check_sandbox_requirements())
+
+    def test_unavailable_on_local_without_opt_in(self):
+        with patch.dict(os.environ, {"HERMES_ALLOW_UNSAFE_EXECUTE_CODE": "0"}):
+            with patch("tools.terminal_tool._get_env_config", return_value={"env_type": "local"}):
+                self.assertFalse(check_sandbox_requirements())
 
     def test_schema_is_valid(self):
         self.assertEqual(EXECUTE_CODE_SCHEMA["name"], "execute_code")
@@ -199,6 +207,30 @@ print(result)
         """Empty code string returns an error."""
         result = json.loads(execute_code("", task_id="test"))
         self.assertIn("error", result)
+
+    def test_blocks_host_file_read_without_opt_in_on_local_backend(self):
+        """Host backends must reject execute_code before arbitrary Python runs."""
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:
+            handle.write("super-secret-value")
+            secret_path = handle.name
+
+        try:
+            with patch("tools.code_execution_tool.SANDBOX_AVAILABLE", True):
+                with patch.dict(os.environ, {"HERMES_ALLOW_UNSAFE_EXECUTE_CODE": "0"}):
+                    with patch("tools.terminal_tool._get_env_config", return_value={"env_type": "local"}):
+                        result = json.loads(
+                            execute_code(
+                                code=f"print(open({secret_path!r}, encoding='utf-8').read())",
+                                task_id="test-host-read",
+                                enabled_tools=list(SANDBOX_ALLOWED_TOOLS),
+                            )
+                        )
+        finally:
+            os.unlink(secret_path)
+
+        self.assertIn("error", result)
+        self.assertIn("disabled on the local and SSH terminal backends", result["error"])
+        self.assertNotIn("super-secret-value", json.dumps(result))
 
     def test_output_captured(self):
         """Multiple print statements are captured in order."""
@@ -660,7 +692,8 @@ class TestExecuteCodeEdgeCases(unittest.TestCase):
             self.assertIn("Windows", result["error"])
 
     def test_whitespace_only_code(self):
-        result = json.loads(execute_code("   \n\t  ", task_id="test"))
+        with patch("tools.code_execution_tool.SANDBOX_AVAILABLE", True):
+            result = json.loads(execute_code("   \n\t  ", task_id="test"))
         self.assertIn("error", result)
         self.assertIn("No code", result["error"])
 
@@ -766,6 +799,7 @@ class TestInterruptHandling(unittest.TestCase):
             t.join(timeout=3)
 
 
+@unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
 class TestHeadTailTruncation(unittest.TestCase):
     """Tests for head+tail truncation of large stdout in execute_code."""
 

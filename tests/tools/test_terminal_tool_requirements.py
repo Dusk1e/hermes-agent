@@ -1,6 +1,7 @@
 """Tests for terminal/file tool availability in local dev environments."""
 
 import importlib
+import sys
 
 from model_tools import get_tool_definitions
 
@@ -26,6 +27,18 @@ class TestTerminalRequirements:
         names = {tool["function"]["name"] for tool in tools}
         assert "terminal" in names
         assert {"read_file", "write_file", "patch", "search_files"}.issubset(names)
+
+    def test_execute_code_is_hidden_on_local_backend_without_opt_in(self, monkeypatch):
+        monkeypatch.delenv("HERMES_ALLOW_UNSAFE_EXECUTE_CODE", raising=False)
+        monkeypatch.setattr(
+            terminal_tool_module,
+            "_get_env_config",
+            lambda: {"env_type": "local"},
+        )
+        tools = get_tool_definitions(enabled_toolsets=["terminal", "code_execution"], quiet_mode=True)
+        names = {tool["function"]["name"] for tool in tools}
+        assert "terminal" in names
+        assert "execute_code" not in names
 
     def test_terminal_and_execute_code_tools_resolve_for_managed_modal(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_ENABLE_NOUS_MANAGED_TOOLS", "1")
@@ -53,4 +66,7 @@ class TestTerminalRequirements:
         names = {tool["function"]["name"] for tool in tools}
 
         assert "terminal" in names
-        assert "execute_code" in names
+        if sys.platform == "win32":
+            assert "execute_code" not in names
+        else:
+            assert "execute_code" in names

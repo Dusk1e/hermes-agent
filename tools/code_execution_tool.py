@@ -68,10 +68,53 @@ DEFAULT_MAX_TOOL_CALLS = 50
 MAX_STDOUT_BYTES = 50_000    # 50 KB
 MAX_STDERR_BYTES = 10_000    # 10 KB
 
+_ISOLATED_EXECUTION_BACKENDS = frozenset({
+    "docker",
+    "singularity",
+    "modal",
+    "daytona",
+})
+_HOST_EXECUTION_BACKENDS = frozenset({"local", "ssh"})
+
+
+def _bool_env(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _get_execute_backend_type() -> str:
+    """Return the configured terminal backend type for execute_code."""
+    try:
+        from tools.terminal_tool import _get_env_config
+
+        config = _get_env_config()
+        if isinstance(config, dict):
+            return str(config.get("env_type", "local")).strip().lower() or "local"
+    except Exception:
+        pass
+    return str(os.getenv("TERMINAL_ENV", "local")).strip().lower() or "local"
+
+
+def _allow_unsafe_host_execution(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Return True when the operator explicitly accepts host-backend execution."""
+    if _bool_env(os.getenv("HERMES_ALLOW_UNSAFE_EXECUTE_CODE", "")):
+        return True
+    cfg = config if isinstance(config, dict) else _load_config()
+    return _bool_env(cfg.get("allow_unsafe_host_execution"))
+
 
 def check_sandbox_requirements() -> bool:
-    """Code execution sandbox requires a POSIX OS for Unix domain sockets."""
-    return SANDBOX_AVAILABLE
+    """Expose execute_code only when the backend is isolated or explicitly opted in."""
+    if not SANDBOX_AVAILABLE:
+        return False
+
+    env_type = _get_execute_backend_type()
+    if env_type in _ISOLATED_EXECUTION_BACKENDS:
+        return True
+    if env_type in _HOST_EXECUTION_BACKENDS:
+        return _allow_unsafe_host_execution()
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -892,9 +935,26 @@ def execute_code(
     if not code or not code.strip():
         return tool_error("No code provided.")
 
+    _cfg = _load_config()
+
     # Dispatch: remote backends use file-based RPC, local uses UDS
-    from tools.terminal_tool import _get_env_config
-    env_type = _get_env_config()["env_type"]
+    env_type = _get_execute_backend_type()
+    if env_type in _HOST_EXECUTION_BACKENDS and not _allow_unsafe_host_execution(_cfg):
+        return tool_error(
+            "execute_code is disabled on the local and SSH terminal backends "
+            "because generated Python would run outside a real sandbox and "
+            "could access the host filesystem, network, and subprocess APIs. "
+            "Use normal tool calls, switch TERMINAL_ENV to docker/modal/"
+            "singularity/daytona, or opt in with "
+            "code_execution.allow_unsafe_host_execution=true "
+            "(or HERMES_ALLOW_UNSAFE_EXECUTE_CODE=1) if you accept that risk."
+        )
+    if env_type not in _ISOLATED_EXECUTION_BACKENDS and env_type not in _HOST_EXECUTION_BACKENDS:
+        return tool_error(
+            f"execute_code is unavailable for terminal backend '{env_type}'. "
+            "Use docker, modal, singularity, or daytona."
+        )
+
     if env_type != "local":
         return _execute_remote(code, task_id, enabled_tools)
 
@@ -904,7 +964,6 @@ def execute_code(
     from tools.terminal_tool import _interrupt_event
 
     # Resolve config
-    _cfg = _load_config()
     timeout = _cfg.get("timeout", DEFAULT_TIMEOUT)
     max_tool_calls = _cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
 
@@ -1296,6 +1355,8 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None) -> dict:
         f"Available via `from hermes_tools import ...`:\n\n"
         f"{tool_lines}\n\n"
         "Limits: 5-minute timeout, 50KB stdout cap, max 50 tool calls per script. "
+        "Available by default only on isolated terminal backends "
+        "(docker/modal/singularity/daytona). "
         "terminal() is foreground-only (no background or pty). "
         "If the session uses a cloud sandbox backend, treat it as resumable task state rather than a durable always-on machine.\n\n"
         "Print your final result to stdout. Use Python stdlib (json, re, math, csv, "
