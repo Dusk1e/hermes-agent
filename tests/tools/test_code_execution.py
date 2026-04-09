@@ -17,6 +17,7 @@ import pytest
 
 import json
 import os
+import base64
 
 os.environ["TERMINAL_ENV"] = "local"
 
@@ -39,6 +40,7 @@ from unittest.mock import patch, MagicMock
 from tools.code_execution_tool import (
     SANDBOX_ALLOWED_TOOLS,
     execute_code,
+    _rpc_poll_loop,
     generate_hermes_tools_module,
     check_sandbox_requirements,
     build_execute_code_schema,
@@ -65,6 +67,96 @@ def _mock_handle_function_call(function_name, function_args, task_id=None, user_
     if function_name == "web_extract":
         return json.dumps("# Extracted content\nSome text from the page.")
     return json.dumps({"error": f"Unknown tool in mock: {function_name}"})
+
+
+def test_rpc_poll_loop_uses_parent_approval_session(tmp_path, monkeypatch):
+    """Remote RPC threads must not fall back to another session's env var."""
+    from tools.approval import (
+        clear_session,
+        has_pending,
+        pop_pending,
+        reset_current_session_key,
+        set_current_session_key,
+    )
+
+    rpc_dir = tmp_path / "rpc"
+    rpc_dir.mkdir()
+    request_path = rpc_dir / "req_000001"
+    request_path.write_text(
+        json.dumps({"tool": "terminal", "args": {"command": "echo hi"}, "seq": 1}),
+        encoding="utf-8",
+    )
+
+    class _FakeRemoteEnv:
+        def execute(self, command, cwd="/", timeout=10):
+            if command.startswith("ls -1 "):
+                matches = sorted(str(p).replace("\\", "/") for p in rpc_dir.glob("req_*"))
+                return {"output": "\n".join(matches), "returncode": 0}
+            if command.startswith("cat "):
+                path = command[4:]
+                with open(path, encoding="utf-8") as handle:
+                    return {"output": handle.read(), "returncode": 0}
+            if command.startswith("rm -f "):
+                path = command[6:]
+                if os.path.exists(path):
+                    os.remove(path)
+                return {"output": "", "returncode": 0}
+            if "base64 -d > " in command and " && mv " in command:
+                encoded = command.split("echo '", 1)[1].split("' | base64 -d > ", 1)[0]
+                _, final_target = command.split("' | base64 -d > ", 1)[1].split(" && mv ", 1)
+                final_target = final_target.strip()
+                decoded = base64.b64decode(encoded).decode("utf-8")
+                with open(final_target, "w", encoding="utf-8") as handle:
+                    handle.write(decoded)
+                return {"output": "", "returncode": 0}
+            raise AssertionError(f"Unexpected fake env command: {command}")
+
+    def _dangerous_dispatch(_function_name, _function_args, task_id=None, user_task=None):
+        from tools.approval import check_all_command_guards
+
+        return json.dumps(check_all_command_guards("rm -rf /tmp/alice-secret", "local"))
+
+    clear_session("alice")
+    clear_session("bob")
+    monkeypatch.setenv("HERMES_EXEC_ASK", "1")
+    monkeypatch.setenv("HERMES_SESSION_KEY", "bob")
+
+    stop_event = threading.Event()
+    token = set_current_session_key("alice")
+    try:
+        with patch("tools.tirith_security.check_command_security",
+                   return_value={"action": "allow", "findings": [], "summary": ""}), \
+             patch("model_tools.handle_function_call", side_effect=_dangerous_dispatch):
+            worker = threading.Thread(
+                target=_rpc_poll_loop,
+                args=(
+                    _FakeRemoteEnv(),
+                    str(rpc_dir).replace("\\", "/"),
+                    "approval-session-test",
+                    [],
+                    [0],
+                    5,
+                    frozenset({"terminal"}),
+                    stop_event,
+                    "alice",
+                ),
+                daemon=True,
+            )
+            worker.start()
+
+            for _ in range(40):
+                if has_pending("alice") or has_pending("bob"):
+                    break
+                time.sleep(0.05)
+            stop_event.set()
+            worker.join(timeout=2)
+    finally:
+        reset_current_session_key(token)
+
+    assert pop_pending("alice") is not None
+    assert pop_pending("bob") is None
+    clear_session("alice")
+    clear_session("bob")
 
 
 class TestSandboxRequirements(unittest.TestCase):
@@ -247,6 +339,47 @@ print(f"Found {len(results.get('results', []))} results")
         result = self._run(code)
         self.assertEqual(result["status"], "success")
         self.assertIn("Found 1 results", result["output"])
+
+    def test_execute_code_rpc_uses_parent_approval_session(self):
+        """Dangerous approvals raised inside RPC threads stay bound to the caller session."""
+        from tools.approval import (
+            clear_session,
+            pop_pending,
+            reset_current_session_key,
+            set_current_session_key,
+        )
+
+        clear_session("alice")
+        clear_session("bob")
+
+        def _dangerous_dispatch(_function_name, _function_args, task_id=None, user_task=None):
+            from tools.approval import check_all_command_guards
+
+            return json.dumps(check_all_command_guards("rm -rf /tmp/alice-secret", "local"))
+
+        code = """
+from hermes_tools import terminal
+print(terminal("echo hi"))
+"""
+        token = set_current_session_key("alice")
+        try:
+            with patch("tools.tirith_security.check_command_security",
+                       return_value={"action": "allow", "findings": [], "summary": ""}), \
+                 patch("model_tools.handle_function_call", side_effect=_dangerous_dispatch), \
+                 patch.dict(os.environ, {"HERMES_EXEC_ASK": "1", "HERMES_SESSION_KEY": "bob"}, clear=False):
+                result = json.loads(execute_code(
+                    code=code,
+                    task_id="approval-session-test",
+                    enabled_tools=["terminal"],
+                ))
+        finally:
+            reset_current_session_key(token)
+
+        self.assertIn(result["status"], {"success", "error"})
+        self.assertIsNotNone(pop_pending("alice"))
+        self.assertIsNone(pop_pending("bob"))
+        clear_session("alice")
+        clear_session("bob")
 
     def test_json_parse_helper(self):
         """json_parse handles control characters that json.loads(strict=True) rejects."""
