@@ -253,3 +253,65 @@ class TestAdditionOnlyHunks:
         assert result.success is True
         assert file_ops.written.endswith("def new_func():\n    return True\n")
         assert "existing = True" in file_ops.written
+
+
+class TestProtectedPathGuards:
+    def test_delete_denies_protected_path(self):
+        patch = """\
+*** Begin Patch
+*** Delete File: ~/.ssh/authorized_keys
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def read_file(self, path, **kw):
+                raise AssertionError("protected delete should be blocked before reading")
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+
+        assert result.success is False
+        assert "protected system/credential file" in result.error
+        assert result.files_deleted == []
+
+    def test_move_denies_protected_destination(self):
+        patch = """\
+*** Begin Patch
+*** Move File: safe.txt -> ~/.ssh/authorized_keys
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def _exec(self, command):
+                raise AssertionError("protected move should be blocked before shell execution")
+
+            def _escape_shell_arg(self, value):
+                return value
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+
+        assert result.success is False
+        assert "protected system/credential file" in result.error
+        assert result.files_modified == []
+
+    def test_move_denies_protected_source(self):
+        patch = """\
+*** Begin Patch
+*** Move File: ~/.ssh/authorized_keys -> safe.txt
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def _exec(self, command):
+                raise AssertionError("protected move should be blocked before shell execution")
+
+            def _escape_shell_arg(self, value):
+                return value
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+
+        assert result.success is False
+        assert "protected system/credential file" in result.error
+        assert result.files_modified == []

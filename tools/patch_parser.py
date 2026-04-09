@@ -65,6 +65,15 @@ class PatchOperation:
     content: Optional[str] = None  # For add file operations
 
 
+def _protected_path_error(path: str) -> Optional[str]:
+    """Return a deny-list error for protected paths, or None if allowed."""
+    from tools.file_operations import _is_write_denied
+
+    if _is_write_denied(path):
+        return f"Write denied: '{path}' is a protected system/credential file."
+    return None
+
+
 def parse_v4a_patch(patch_content: str) -> Tuple[List[PatchOperation], Optional[str]]:
     """
     Parse a V4A format patch.
@@ -317,6 +326,10 @@ def _apply_add(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
 
 def _apply_delete(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
     """Apply a delete file operation."""
+    protected_error = _protected_path_error(op.file_path)
+    if protected_error:
+        return False, protected_error
+
     # Read file first for diff
     read_result = file_ops.read_file(op.file_path)
     
@@ -336,6 +349,13 @@ def _apply_delete(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
 
 def _apply_move(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
     """Apply a move file operation."""
+    protected_error = _protected_path_error(op.file_path)
+    if protected_error:
+        return False, protected_error
+    protected_error = _protected_path_error(op.new_path or "")
+    if protected_error:
+        return False, protected_error
+
     # Use shell mv command
     mv_result = file_ops._exec(
         f"mv {file_ops._escape_shell_arg(op.file_path)} {file_ops._escape_shell_arg(op.new_path)}"
