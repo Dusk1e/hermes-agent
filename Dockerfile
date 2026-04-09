@@ -9,8 +9,11 @@ RUN apt-get update && \
 COPY . /opt/hermes
 WORKDIR /opt/hermes
 
-# Install Python and Node dependencies in one layer, no cache
-RUN pip install --no-cache-dir -e ".[all]" --break-system-packages && \
+# Install Python and Node dependencies in one layer, no cache.
+# Use uv here to match the project's documented/dev install path and
+# avoid pip resolver blowups on broad "[all]" extras in CI Docker builds.
+RUN pip install --no-cache-dir uv --break-system-packages && \
+    uv pip install --system --break-system-packages --no-cache -e ".[all]" && \
     npm install --prefer-offline --no-audit && \
     npx playwright install --with-deps chromium --only-shell && \
     cd /opt/hermes/scripts/whatsapp-bridge && \
