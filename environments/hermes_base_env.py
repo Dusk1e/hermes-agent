@@ -36,10 +36,19 @@ if str(_repo_root) not in sys.path:
 from dotenv import load_dotenv
 from pydantic import Field
 
+
+def _load_project_dotenv(path: Path) -> None:
+    """Load the repo .env with the same Windows-safe encoding fallback as CLI entrypoints."""
+    try:
+        load_dotenv(dotenv_path=path, encoding="utf-8")
+    except UnicodeDecodeError:
+        load_dotenv(dotenv_path=path, encoding="latin-1")
+
+
 # Load API keys from hermes-agent/.env so all environments can access them
 _env_path = _repo_root / ".env"
 if _env_path.exists():
-    load_dotenv(dotenv_path=_env_path)
+    _load_project_dotenv(_env_path)
 
 # Apply monkey patches for async-safe tool operation inside Atropos's event loop.
 # This patches SwerexModalEnvironment to use a background thread instead of
