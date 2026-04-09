@@ -1,5 +1,6 @@
 """Tests for the V4A patch format parser."""
 
+import os
 from types import SimpleNamespace
 
 from tools.patch_parser import (
@@ -185,6 +186,70 @@ class TestApplyUpdate:
             '    result = 1\n'
             '    return result + 1'
         )
+
+
+class TestApplyWritePolicy:
+    def test_delete_denies_protected_file_before_shell_exec(self):
+        patch = """\
+*** Begin Patch
+*** Delete File: ~/.ssh/authorized_keys
+*** End Patch"""
+        operations, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def __init__(self):
+                self.executed = []
+
+            def read_file(self, path, **kw):
+                raise AssertionError("protected delete should be blocked before reading")
+
+            def _escape_shell_arg(self, path):
+                return f"'{path}'"
+
+            def _exec(self, command):
+                self.executed.append(command)
+                return SimpleNamespace(exit_code=0, stdout="")
+
+        file_ops = FakeFileOps()
+        result = apply_v4a_operations(operations, file_ops)
+
+        assert result.success is False
+        assert "Delete denied" in result.error
+        assert file_ops.executed == []
+
+    def test_move_denies_safe_root_escape_before_shell_exec(self, tmp_path, monkeypatch):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(workspace))
+
+        source = workspace / "allowed.txt"
+        target = tmp_path / "outside.txt"
+        patch = f"""\
+*** Begin Patch
+*** Move File: {source} -> {target}
+*** End Patch"""
+        operations, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def __init__(self):
+                self.executed = []
+
+            def _escape_shell_arg(self, path):
+                return f"'{path}'"
+
+            def _exec(self, command):
+                self.executed.append(command)
+                return SimpleNamespace(exit_code=0, stdout="")
+
+        file_ops = FakeFileOps()
+        result = apply_v4a_operations(operations, file_ops)
+
+        assert result.success is False
+        assert "Move denied" in result.error
+        assert os.fspath(target) in result.error
+        assert file_ops.executed == []
 
 
 class TestAdditionOnlyHunks:

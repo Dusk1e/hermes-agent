@@ -165,6 +165,31 @@ class TestPatchHandler:
         assert result["status"] == "ok"
         mock_ops.patch_v4a.assert_called_once()
 
+    @patch("tools.file_tools._check_sensitive_path")
+    @patch("tools.file_tools._get_file_ops")
+    def test_patch_mode_checks_move_source_and_destination(self, mock_get, mock_check_sensitive):
+        from tools.file_tools import patch_tool
+
+        mock_check_sensitive.side_effect = lambda path: (
+            "Refusing move target" if path == "dest.cfg" else None
+        )
+        result = json.loads(patch_tool(
+            mode="patch",
+            patch=(
+                "*** Begin Patch\n"
+                "*** Move File: source.cfg -> dest.cfg\n"
+                "*** End Patch"
+            ),
+        ))
+
+        assert "error" in result
+        assert "Refusing move target" in result["error"]
+        assert [call.args[0] for call in mock_check_sensitive.call_args_list] == [
+            "source.cfg",
+            "dest.cfg",
+        ]
+        mock_get.assert_not_called()
+
     @patch("tools.file_tools._get_file_ops")
     def test_patch_mode_missing_content_errors(self, mock_get):
         from tools.file_tools import patch_tool

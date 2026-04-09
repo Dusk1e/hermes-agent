@@ -65,6 +65,27 @@ class PatchOperation:
     content: Optional[str] = None  # For add file operations
 
 
+def _expand_path_for_policy(file_ops: Any, path: str) -> str:
+    """Normalize a patch path before applying write-policy checks."""
+    expand = getattr(file_ops, "_expand_path", None)
+    if callable(expand):
+        try:
+            return expand(path)
+        except Exception:
+            return path
+    return path
+
+
+def _check_write_policy(file_ops: Any, path: str, action: str) -> Optional[str]:
+    """Return an error when a patch operation targets a protected path."""
+    from tools.file_operations import _is_write_denied
+
+    expanded = _expand_path_for_policy(file_ops, path)
+    if _is_write_denied(expanded):
+        return f"{action} denied: '{path}' is a protected system/credential file."
+    return None
+
+
 def parse_v4a_patch(patch_content: str) -> Tuple[List[PatchOperation], Optional[str]]:
     """
     Parse a V4A format patch.
@@ -317,6 +338,10 @@ def _apply_add(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
 
 def _apply_delete(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
     """Apply a delete file operation."""
+    deny_error = _check_write_policy(file_ops, op.file_path, "Delete")
+    if deny_error:
+        return False, deny_error
+
     # Read file first for diff
     read_result = file_ops.read_file(op.file_path)
     
@@ -325,7 +350,8 @@ def _apply_delete(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
         return True, f"# {op.file_path} already deleted or doesn't exist"
     
     # Delete directly via shell command using the underlying environment
-    rm_result = file_ops._exec(f"rm -f {file_ops._escape_shell_arg(op.file_path)}")
+    target_path = _expand_path_for_policy(file_ops, op.file_path)
+    rm_result = file_ops._exec(f"rm -f {file_ops._escape_shell_arg(target_path)}")
     
     if rm_result.exit_code != 0:
         return False, rm_result.stdout
@@ -336,9 +362,20 @@ def _apply_delete(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
 
 def _apply_move(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
     """Apply a move file operation."""
+    source_error = _check_write_policy(file_ops, op.file_path, "Move")
+    if source_error:
+        return False, source_error
+
+    dest_error = _check_write_policy(file_ops, op.new_path, "Move")
+    if dest_error:
+        return False, dest_error
+
+    source_path = _expand_path_for_policy(file_ops, op.file_path)
+    dest_path = _expand_path_for_policy(file_ops, op.new_path)
+
     # Use shell mv command
     mv_result = file_ops._exec(
-        f"mv {file_ops._escape_shell_arg(op.file_path)} {file_ops._escape_shell_arg(op.new_path)}"
+        f"mv {file_ops._escape_shell_arg(source_path)} {file_ops._escape_shell_arg(dest_path)}"
     )
     
     if mv_result.exit_code != 0:
