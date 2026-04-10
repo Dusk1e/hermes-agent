@@ -507,7 +507,11 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         from hermes_cli.config import load_config
         config = load_config()
         skills_cfg = config.get("skills", {})
-        resolved_platform = platform or os.getenv("HERMES_PLATFORM")
+        resolved_platform = (
+            platform
+            or os.getenv("HERMES_PLATFORM")
+            or os.getenv("HERMES_SESSION_PLATFORM")
+        )
         if resolved_platform:
             platform_disabled = skills_cfg.get("platform_disabled", {}).get(resolved_platform)
             if platform_disabled is not None:

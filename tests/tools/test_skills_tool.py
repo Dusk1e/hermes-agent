@@ -389,6 +389,30 @@ class TestSkillView:
         assert result["success"] is False
         assert "disabled" in result["error"].lower()
 
+    def test_view_disabled_skill_blocked_for_session_platform(self, tmp_path):
+        """Gateway session platform overrides should hide disabled skills too."""
+        with (
+            patch("tools.skills_tool.SKILLS_DIR", tmp_path),
+            patch.dict(
+                os.environ,
+                {"HERMES_SESSION_PLATFORM": "telegram"},
+                clear=False,
+            ),
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={
+                    "skills": {
+                        "platform_disabled": {"telegram": ["hidden-skill"]},
+                    }
+                },
+            ),
+        ):
+            _make_skill(tmp_path, "hidden-skill")
+            raw = skill_view("hidden-skill")
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "disabled" in result["error"].lower()
+
     def test_view_enabled_skill_allowed(self, tmp_path):
         """Non-disabled skills should be viewable normally."""
         with (
