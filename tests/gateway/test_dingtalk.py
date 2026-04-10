@@ -165,12 +165,12 @@ class TestSend:
 
         result = await adapter.send(
             "chat-123", "Hello!",
-            metadata={"session_webhook": "https://dingtalk.example/webhook"}
+            metadata={"session_webhook": "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"}
         )
         assert result.success is True
         mock_client.post.assert_called_once()
         call_args = mock_client.post.call_args
-        assert call_args[0][0] == "https://dingtalk.example/webhook"
+        assert call_args[0][0] == "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
         payload = call_args[1]["json"]
         assert payload["msgtype"] == "markdown"
         assert payload["markdown"]["title"] == "Hermes"
@@ -196,11 +196,26 @@ class TestSend:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
         adapter._http_client = mock_client
-        adapter._session_webhooks["chat-123"] = "https://cached.example/webhook"
+        adapter._session_webhooks["chat-123"] = "https://api.dingtalk.com/v1.0/robot/oToMessages/cached"
 
         result = await adapter.send("chat-123", "Hello!")
         assert result.success is True
-        assert mock_client.post.call_args[0][0] == "https://cached.example/webhook"
+        assert mock_client.post.call_args[0][0] == "https://api.dingtalk.com/v1.0/robot/oToMessages/cached"
+
+    @pytest.mark.asyncio
+    async def test_send_rejects_non_dingtalk_metadata_webhook(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        adapter = DingTalkAdapter(PlatformConfig(enabled=True))
+        adapter._http_client = AsyncMock()
+
+        result = await adapter.send(
+            "chat-123", "Hello!",
+            metadata={"session_webhook": "https://evil.example/webhook"}
+        )
+
+        assert result.success is False
+        assert "Invalid session_webhook origin" in result.error
+        adapter._http_client.post.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_send_handles_http_error(self):
@@ -216,7 +231,7 @@ class TestSend:
 
         result = await adapter.send(
             "chat-123", "Hello!",
-            metadata={"session_webhook": "https://example/webhook"}
+            metadata={"session_webhook": "https://api.dingtalk.com/v1.0/robot/oToMessages/error"}
         )
         assert result.success is False
         assert "400" in result.error

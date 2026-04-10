@@ -68,6 +68,11 @@ def check_dingtalk_requirements() -> bool:
     return True
 
 
+def _is_valid_session_webhook(session_webhook: str) -> bool:
+    """Allow only official DingTalk session webhook origins."""
+    return bool(session_webhook and _DINGTALK_WEBHOOK_RE.match(session_webhook))
+
+
 class DingTalkAdapter(BasePlatformAdapter):
     """DingTalk chatbot adapter using Stream Mode.
 
@@ -200,7 +205,7 @@ class DingTalkAdapter(BasePlatformAdapter):
 
         # Store session webhook for reply routing (validate origin to prevent SSRF)
         session_webhook = getattr(message, "session_webhook", None) or ""
-        if session_webhook and chat_id and _DINGTALK_WEBHOOK_RE.match(session_webhook):
+        if chat_id and _is_valid_session_webhook(session_webhook):
             if len(self._session_webhooks) >= _SESSION_WEBHOOKS_MAX:
                 # Evict oldest entry to cap memory growth
                 try:
@@ -282,7 +287,14 @@ class DingTalkAdapter(BasePlatformAdapter):
         """Send a markdown reply via DingTalk session webhook."""
         metadata = metadata or {}
 
-        session_webhook = metadata.get("session_webhook") or self._session_webhooks.get(chat_id)
+        metadata_webhook = metadata.get("session_webhook") or ""
+        if metadata_webhook and not _is_valid_session_webhook(metadata_webhook):
+            return SendResult(
+                success=False,
+                error="Invalid session_webhook origin. Only DingTalk API webhooks are allowed.",
+            )
+
+        session_webhook = metadata_webhook or self._session_webhooks.get(chat_id)
         if not session_webhook:
             return SendResult(success=False,
                               error="No session_webhook available. Reply must follow an incoming message.")
