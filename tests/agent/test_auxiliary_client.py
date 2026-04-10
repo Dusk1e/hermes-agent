@@ -14,6 +14,7 @@ from agent.auxiliary_client import (
     resolve_provider_client,
     auxiliary_max_tokens_param,
     call_llm,
+    async_call_llm,
     _read_codex_access_token,
     _get_auxiliary_provider,
     _get_provider_chain,
@@ -1112,6 +1113,45 @@ class TestCallLlmPaymentFallback:
                     messages=[{"role": "user", "content": "hello"}],
                 )
 
+
+class TestAsyncCallLlmPaymentFallback:
+    """async_call_llm() should mirror sync payment fallback behavior."""
+
+    def _make_402_error(self, msg="Payment Required: insufficient credits"):
+        exc = Exception(msg)
+        exc.status_code = 402
+        return exc
+
+    @pytest.mark.asyncio
+    async def test_402_triggers_fallback(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        primary_client = MagicMock()
+        primary_client.chat.completions.create.side_effect = self._make_402_error()
+
+        fallback_client = MagicMock()
+        fallback_response = MagicMock()
+        fallback_client.chat.completions.create.return_value = fallback_response
+
+        with patch(
+            "agent.auxiliary_client._get_cached_client",
+            return_value=(primary_client, "google/gemini-3-flash-preview"),
+        ), patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=("openrouter", "google/gemini-3-flash-preview", None, None),
+        ), patch(
+            "agent.auxiliary_client._try_payment_fallback",
+            return_value=(fallback_client, "gpt-5.2-codex", "openai-codex"),
+        ) as mock_fb:
+            result = await async_call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        assert result is fallback_response
+        mock_fb.assert_called_once_with("openrouter", "compression", async_mode=True)
+        fb_kwargs = fallback_client.chat.completions.create.call_args.kwargs
+        assert fb_kwargs["model"] == "gpt-5.2-codex"
 
 # ---------------------------------------------------------------------------
 # Gate: _resolve_api_key_provider must skip anthropic when not configured

@@ -1051,6 +1051,8 @@ def _is_connection_error(exc: Exception) -> bool:
 def _try_payment_fallback(
     failed_provider: str,
     task: str = None,
+    *,
+    async_mode: bool = False,
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Try alternative providers after a payment/credit error.
 
@@ -1080,6 +1082,8 @@ def _try_payment_fallback(
             continue
         client, model = try_fn()
         if client is not None:
+            if async_mode:
+                client, model = _to_async_client(client, model)
             logger.info(
                 "Auxiliary %s: payment error on %s — falling back to %s (%s)",
                 task or "call", failed_provider, label, model or "default",
@@ -2257,5 +2261,28 @@ async def async_call_llm(
         if "max_tokens" in err_str or "unsupported_parameter" in err_str:
             kwargs.pop("max_tokens", None)
             kwargs["max_completion_tokens"] = max_tokens
-            return await client.chat.completions.create(**kwargs)
+            try:
+                return await client.chat.completions.create(**kwargs)
+            except Exception as retry_err:
+                if not (_is_payment_error(retry_err) or _is_connection_error(retry_err)):
+                    raise
+                first_err = retry_err
+
+        should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err)
+        if should_fallback:
+            reason = "payment error" if _is_payment_error(first_err) else "connection error"
+            logger.info("Auxiliary %s: %s on %s (%s), trying fallback",
+                        task or "call", reason, resolved_provider, first_err)
+            fb_client, fb_model, fb_label = _try_payment_fallback(
+                resolved_provider,
+                task,
+                async_mode=True,
+            )
+            if fb_client is not None:
+                fb_kwargs = _build_call_kwargs(
+                    fb_label, fb_model, messages,
+                    temperature=temperature, max_tokens=max_tokens,
+                    tools=tools, timeout=effective_timeout,
+                    extra_body=extra_body)
+                return await fb_client.chat.completions.create(**fb_kwargs)
         raise
