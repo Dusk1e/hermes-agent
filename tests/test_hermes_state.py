@@ -334,6 +334,24 @@ class TestFTS5Search:
         assert isinstance(results[0]["context"], list)
         assert len(results[0]["context"]) > 0
 
+    def test_search_context_uses_session_order_not_global_rowid(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.create_session(session_id="s2", source="cli")
+
+        db.append_message("s1", role="user", content="before context")
+        db.append_message("s2", role="user", content="other session one")
+        db.append_message("s1", role="assistant", content="needle match")
+        db.append_message("s2", role="assistant", content="other session two")
+        db.append_message("s1", role="user", content="after context")
+
+        results = db.search_messages("needle")
+        assert len(results) == 1
+        assert [msg["content"] for msg in results[0]["context"]] == [
+            "before context",
+            "needle match",
+            "after context",
+        ]
+
     def test_search_special_chars_do_not_crash(self, db):
         """FTS5 special characters in queries must not raise OperationalError."""
         db.create_session(session_id="s1", source="cli")

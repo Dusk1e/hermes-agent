@@ -1071,10 +1071,29 @@ class SessionDB:
             try:
                 with self._lock:
                     ctx_cursor = self._conn.execute(
-                        """SELECT role, content FROM messages
-                           WHERE session_id = ? AND id >= ? - 1 AND id <= ? + 1
-                           ORDER BY id""",
-                        (match["session_id"], match["id"], match["id"]),
+                        """WITH ordered_messages AS (
+                               SELECT
+                                   id,
+                                   role,
+                                   content,
+                                   ROW_NUMBER() OVER (
+                                       ORDER BY timestamp, id
+                                   ) AS row_num
+                               FROM messages
+                               WHERE session_id = ?
+                           ),
+                           matched_message AS (
+                               SELECT row_num
+                               FROM ordered_messages
+                               WHERE id = ?
+                           )
+                           SELECT role, content
+                           FROM ordered_messages
+                           WHERE row_num BETWEEN
+                               (SELECT row_num FROM matched_message) - 1 AND
+                               (SELECT row_num FROM matched_message) + 1
+                           ORDER BY row_num""",
+                        (match["session_id"], match["id"]),
                     )
                     context_msgs = [
                         {"role": r["role"], "content": (r["content"] or "")[:200]}
