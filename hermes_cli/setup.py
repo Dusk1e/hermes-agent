@@ -1484,12 +1484,16 @@ def setup_terminal_backend(config: dict):
                 ssh_cmd.extend(["-p", port])
             ssh_cmd.append(f"{user}@{host}" if user else host)
             ssh_cmd.append("echo ok")
-            result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                print_success("  SSH connection successful!")
+            try:
+                result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=10)
+            except FileNotFoundError:
+                print_warning("  SSH client not found. Install OpenSSH and retry the test.")
             else:
-                print_warning(f"  SSH connection failed: {result.stderr.strip()}")
-                print_info("  Check your SSH key and host settings.")
+                if result.returncode == 0:
+                    print_success("  SSH connection successful!")
+                else:
+                    print_warning(f"  SSH connection failed: {result.stderr.strip()}")
+                    print_info("  Check your SSH key and host settings.")
 
     # Sync terminal backend to .env so terminal_tool picks it up directly.
     # config.yaml is the source of truth, but terminal_tool reads TERMINAL_ENV.

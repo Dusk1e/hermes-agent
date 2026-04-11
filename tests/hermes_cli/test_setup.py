@@ -362,3 +362,36 @@ def test_modal_setup_persists_direct_mode_when_user_chooses_their_own_account(tm
 
     assert config["terminal"]["backend"] == "modal"
     assert config["terminal"]["modal_mode"] == "direct"
+
+
+def test_ssh_setup_warns_when_ssh_binary_is_missing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = load_config()
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select terminal backend:":
+            return 3
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    prompt_values = iter([
+        "example.com",
+        "alice",
+        "22",
+        str(tmp_path / "id_rsa"),
+    ])
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", lambda *args, **kwargs: next(prompt_values))
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError("ssh")),
+    )
+
+    from hermes_cli.setup import setup_terminal_backend
+
+    setup_terminal_backend(config)
+
+    out = capsys.readouterr().out
+    assert config["terminal"]["backend"] == "ssh"
+    assert "SSH client not found" in out
