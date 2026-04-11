@@ -78,6 +78,21 @@ class TestHeredocMarker:
         assert marker.startswith("HERMES_PERSIST_")
         assert marker not in content
 
+    def test_generated_marker_never_collides_with_content(self):
+        """Regression: the fallback marker must be validated against content.
+
+        An unchecked collision would cause the heredoc to terminate early,
+        letting subsequent tool output be interpreted as shell commands.
+        """
+        # Craft content that contains both the default marker and several
+        # plausible fallback markers to exercise the retry loop.
+        fake_fallbacks = " ".join(f"HERMES_PERSIST_{i:08x}" for i in range(20))
+        content = f"{HEREDOC_MARKER} {fake_fallbacks}"
+        marker = _heredoc_marker(content)
+        # The returned marker must NEVER appear in the content
+        assert marker not in content
+        assert marker.startswith("HERMES_PERSIST_")
+
 
 # ── _write_to_sandbox ─────────────────────────────────────────────────
 
@@ -122,7 +137,36 @@ class TestWriteToSandbox:
         remote_path = "/data/data/com.termux/files/usr/tmp/hermes-results/abc.txt"
         _write_to_sandbox("content", remote_path, env)
         cmd = env.execute.call_args[0][0]
-        assert "mkdir -p /data/data/com.termux/files/usr/tmp/hermes-results" in cmd
+        assert "mkdir -p" in cmd
+        assert "com.termux" in cmd
+
+    def test_shell_metacharacters_in_path_are_quoted(self):
+        """Regression: tool_use_id from the LLM API must not allow shell injection."""
+        env = MagicMock()
+        env.execute.return_value = {"output": "", "returncode": 0}
+        # Simulate a malicious tool_use_id containing shell metacharacters
+        malicious_id = "tc_$(rm -rf /)"
+        remote_path = f"/tmp/hermes-results/{malicious_id}.txt"
+        _write_to_sandbox("safe content", remote_path, env)
+        cmd = env.execute.call_args[0][0]
+        # The path must be shell-quoted — the raw metacharacters must NOT
+        # appear unescaped in the command string.
+        assert "$(rm -rf /)" not in cmd.split("'")[0]  # not outside quotes
+        # shlex.quote wraps in single quotes, so the entire path should be quoted
+        import shlex
+        assert shlex.quote(remote_path) in cmd
+
+    def test_spaces_in_storage_dir_are_quoted(self):
+        """Paths with spaces must be shell-quoted to avoid silent failures."""
+        env = MagicMock()
+        env.execute.return_value = {"output": "", "returncode": 0}
+        remote_path = "/tmp/hermes results/abc.txt"
+        _write_to_sandbox("content", remote_path, env)
+        cmd = env.execute.call_args[0][0]
+        import shlex
+        # The directory and file path should both be quoted
+        assert shlex.quote("/tmp/hermes results") in cmd
+        assert shlex.quote(remote_path) in cmd
 
 
 class TestResolveStorageDir:

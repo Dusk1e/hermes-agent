@@ -24,6 +24,7 @@ Defense against context-window overflow operates at three levels:
 
 import logging
 import os
+import shlex
 import uuid
 
 from tools.budget_config import (
@@ -71,15 +72,30 @@ def _heredoc_marker(content: str) -> str:
     """Return a heredoc delimiter that doesn't collide with content."""
     if HEREDOC_MARKER not in content:
         return HEREDOC_MARKER
-    return f"HERMES_PERSIST_{uuid.uuid4().hex[:8]}"
+    # Generate a random marker and verify it doesn't appear in the content.
+    # Retry up to 10 times to avoid the (astronomically unlikely) case where
+    # the generated marker collides with text in the tool output — if it did,
+    # the heredoc would terminate early and remaining content could be
+    # interpreted as shell commands.
+    for _ in range(10):
+        candidate = f"HERMES_PERSIST_{uuid.uuid4().hex[:8]}"
+        if candidate not in content:
+            return candidate
+    # Final fallback: use the full 32-char hex to make collision near-impossible
+    return f"HERMES_PERSIST_{uuid.uuid4().hex}"
 
 
 def _write_to_sandbox(content: str, remote_path: str, env) -> bool:
     """Write content into the sandbox via env.execute(). Returns True on success."""
     marker = _heredoc_marker(content)
     storage_dir = os.path.dirname(remote_path)
+    # Quote paths to prevent shell injection — remote_path includes
+    # tool_use_id which originates from the LLM API response and must
+    # not be trusted for shell interpolation.
+    q_storage_dir = shlex.quote(storage_dir)
+    q_remote_path = shlex.quote(remote_path)
     cmd = (
-        f"mkdir -p {storage_dir} && cat > {remote_path} << '{marker}'\n"
+        f"mkdir -p {q_storage_dir} && cat > {q_remote_path} << '{marker}'\n"
         f"{content}\n"
         f"{marker}"
     )
