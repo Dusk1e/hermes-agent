@@ -811,6 +811,42 @@ class TestInterruptHandling(unittest.TestCase):
             set_interrupt(False, main_tid)
             t.join(timeout=3)
 
+    def test_execute_code_registers_child_process_for_kill_all(self):
+        """execute_code should be killable immediately via process_registry.kill_all()."""
+        code = "import time; time.sleep(60); print('should not reach')"
+        result_holder = {}
+
+        def run_code():
+            result_holder["value"] = json.loads(execute_code(
+                code,
+                task_id="test-kill-all",
+                enabled_tools=list(SANDBOX_ALLOWED_TOOLS),
+            ))
+
+        worker = threading.Thread(target=run_code, daemon=True)
+        worker.start()
+
+        try:
+            from tools.process_registry import process_registry
+
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if process_registry.has_active_processes("test-kill-all"):
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("execute_code child was not registered in process_registry")
+
+            killed = process_registry.kill_all(task_id="test-kill-all")
+            self.assertGreaterEqual(killed, 1)
+
+            worker.join(timeout=10)
+            self.assertFalse(worker.is_alive(), "execute_code did not stop after kill_all()")
+            self.assertEqual(result_holder["value"]["status"], "interrupted")
+        finally:
+            from tools.process_registry import process_registry
+            process_registry.kill_all(task_id="test-kill-all")
+
 
 class TestHeadTailTruncation(unittest.TestCase):
     """Tests for head+tail truncation of large stdout in execute_code."""

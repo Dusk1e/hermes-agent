@@ -3572,6 +3572,16 @@ class GatewayRunner:
                 _response_time, _api_calls, _resp_len,
             )
 
+            _discard_reason = (
+                agent_result.get("discarded") and "discarded"
+            ) or self._discard_turn_result_reason(session_key, session_entry.session_id)
+            if _discard_reason:
+                logger.info(
+                    "Ignoring orphaned agent response for session %s after reset/stop (%s)",
+                    session_key[:20], _discard_reason,
+                )
+                return None
+
             # Surface error details when the agent failed silently (final_response=None)
             if not response and agent_result.get("failed"):
                 error_detail = agent_result.get("error", "unknown error")
@@ -3921,6 +3931,28 @@ class GatewayRunner:
             lines.append(f"◆ Endpoint: {base_url}")
 
         return "\n".join(lines)
+
+    def _discard_turn_result_reason(
+        self,
+        session_key: Optional[str],
+        session_id: Optional[str],
+    ) -> Optional[str]:
+        """Return a reason when a finished turn no longer belongs to the live session."""
+        if not session_key or not session_id:
+            return None
+
+        try:
+            current_entry = self.session_store.get_session_entry(session_key)
+        except Exception:
+            return None
+
+        if current_entry is None:
+            return "missing"
+        if getattr(current_entry, "suspended", False):
+            return "suspended"
+        if current_entry.session_id != session_id:
+            return "reset"
+        return None
 
     async def _handle_reset_command(self, event: MessageEvent) -> str:
         """Handle /new or /reset command."""
@@ -8375,6 +8407,24 @@ class GatewayRunner:
                     # Fallback activated on a successful run — evict cached
                     # agent so the next message retries the primary model.
                     self._evict_cached_agent(session_key)
+
+            _discard_reason = self._discard_turn_result_reason(session_key, session_id)
+            if _discard_reason:
+                logger.info(
+                    "Discarding completed agent result for session %s (%s)",
+                    session_key[:20] if session_key else "?",
+                    _discard_reason,
+                )
+                _discard_source = response if isinstance(response, dict) else {}
+                if not _discard_source and isinstance(result_holder[0], dict):
+                    _discard_source = result_holder[0]
+                return {
+                    "discarded": True,
+                    "final_response": "",
+                    "messages": _discard_source.get("messages", history),
+                    "api_calls": _discard_source.get("api_calls", 0),
+                    "already_sent": True,
+                }
 
             # Check if we were interrupted OR have a queued message (/queue).
             result = result_holder[0]

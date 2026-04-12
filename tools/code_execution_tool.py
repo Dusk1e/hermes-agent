@@ -951,6 +951,7 @@ def execute_code(
     tool_call_counter = [0]  # mutable so the RPC thread can increment
     exec_start = time.monotonic()
     server_sock = None
+    tracked_proc_session = None
 
     try:
         # Write the auto-generated hermes_tools module
@@ -1036,6 +1037,18 @@ def execute_code(
             stdin=subprocess.DEVNULL,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
         )
+
+        try:
+            from tools.process_registry import process_registry
+            tracked_proc_session = process_registry.register_process(
+                proc,
+                f"{sys.executable} script.py",
+                cwd=tmpdir,
+                task_id=task_id or "",
+                persist_checkpoint=False,
+            )
+        except Exception as exc:
+            logger.debug("Failed to register execute_code child process: %s", exc)
 
         # --- Poll loop: watch for exit, timeout, and interrupt ---
         deadline = time.monotonic() + timeout
@@ -1147,6 +1160,9 @@ def execute_code(
         exit_code = proc.returncode if proc.returncode is not None else -1
         duration = round(time.monotonic() - exec_start, 2)
 
+        if status == "success" and exit_code != 0 and _is_interrupted():
+            status = "interrupted"
+
         # Wait for RPC thread to finish
         server_sock.close()  # break accept() so thread exits promptly
         server_sock = None  # prevent double close in finally
@@ -1205,6 +1221,12 @@ def execute_code(
         }, ensure_ascii=False)
 
     finally:
+        if tracked_proc_session is not None:
+            try:
+                from tools.process_registry import process_registry
+                process_registry.unregister_process(tracked_proc_session.id)
+            except Exception as exc:
+                logger.debug("Failed to unregister execute_code child process: %s", exc)
         # Cleanup temp dir and socket
         if server_sock is not None:
             try:

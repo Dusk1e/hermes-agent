@@ -783,6 +783,12 @@ class SessionStore:
                     entry.last_prompt_tokens = last_prompt_tokens
                 self._save()
 
+    def get_session_entry(self, session_key: str) -> Optional[SessionEntry]:
+        """Return the current entry for ``session_key`` without creating one."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            return self._entries.get(session_key)
+
     def suspend_session(self, session_key: str) -> bool:
         """Mark a session as suspended so it auto-resets on next access.
 

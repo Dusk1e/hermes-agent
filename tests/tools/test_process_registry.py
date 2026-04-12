@@ -253,6 +253,28 @@ class TestActiveQueries:
         assert registry.has_active_processes("t1") is False
 
 
+class TestManualRegistration:
+    def test_register_and_unregister_process(self, registry):
+        proc = MagicMock()
+        proc.pid = 4321
+
+        session = registry.register_process(
+            proc,
+            "python script.py",
+            cwd="/tmp",
+            task_id="task-123",
+            persist_checkpoint=False,
+        )
+
+        assert registry.has_active_processes("task-123") is True
+        assert registry.get(session.id) is session
+        assert session.persist_checkpoint is False
+
+        assert registry.unregister_process(session.id) is True
+        assert registry.get(session.id) is None
+        assert registry.has_active_processes("task-123") is False
+
+
 # =========================================================================
 # Pruning
 # =========================================================================

@@ -98,6 +98,7 @@ class ProcessSession:
     _watch_disabled: bool = field(default=False, repr=False) # permanently killed by overload
     _watch_window_hits: int = field(default=0, repr=False)   # hits in current rate window
     _watch_window_start: float = field(default=0.0, repr=False)
+    persist_checkpoint: bool = True               # False for ephemeral foreground tasks
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _reader_thread: Optional[threading.Thread] = field(default=None, repr=False)
     _pty: Any = field(default=None, repr=False)  # ptyprocess handle (when use_pty=True)
@@ -474,6 +475,46 @@ class ProcessRegistry:
 
         self._write_checkpoint()
         return session
+
+    def register_process(
+        self,
+        process: subprocess.Popen,
+        command: str,
+        *,
+        cwd: str = None,
+        task_id: str = "",
+        session_key: str = "",
+        persist_checkpoint: bool = True,
+    ) -> ProcessSession:
+        """Track an already-spawned local process without creating reader threads."""
+        session = ProcessSession(
+            id=f"proc_{uuid.uuid4().hex[:12]}",
+            command=command,
+            task_id=task_id,
+            session_key=session_key,
+            pid=getattr(process, "pid", None),
+            process=process,
+            cwd=cwd or os.getcwd(),
+            started_at=time.time(),
+            persist_checkpoint=persist_checkpoint,
+        )
+        with self._lock:
+            self._prune_if_needed()
+            self._running[session.id] = session
+        self._write_checkpoint()
+        return session
+
+    def unregister_process(self, session_id: str) -> bool:
+        """Remove a tracked process session once the owner has fully cleaned it up."""
+        removed = False
+        with self._lock:
+            if self._running.pop(session_id, None) is not None:
+                removed = True
+            if self._finished.pop(session_id, None) is not None:
+                removed = True
+        if removed:
+            self._write_checkpoint()
+        return removed
 
     # ----- Reader / Poller Threads -----
 
@@ -973,7 +1014,7 @@ class ProcessRegistry:
             with self._lock:
                 entries = []
                 for s in self._running.values():
-                    if not s.exited:
+                    if not s.exited and s.persist_checkpoint:
                         entries.append({
                             "session_id": s.id,
                             "command": s.command,
