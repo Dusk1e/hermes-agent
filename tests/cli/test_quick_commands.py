@@ -4,6 +4,11 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from rich.text import Text
 import pytest
 
+from gateway.config import Platform
+from gateway.platforms.base import MessageEvent, MessageType
+from gateway.session import SessionSource
+from tests.gateway.restart_test_helpers import make_restart_runner
+
 
 # ── CLI tests ──────────────────────────────────────────────────────────────
 
@@ -127,6 +132,20 @@ class TestGatewayQuickCommands:
         event.source.chat_id = "123"
         return event
 
+    def _make_real_event(self, text):
+        return MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id="123",
+                chat_type="dm",
+                user_id="test_user",
+                user_name="Test User",
+            ),
+            message_id="m1",
+        )
+
     @pytest.mark.asyncio
     async def test_exec_command_returns_output(self):
         from gateway.run import GatewayRunner
@@ -186,3 +205,41 @@ class TestGatewayQuickCommands:
         event = self._make_event("limits")
         result = await runner._handle_message(event)
         assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_alias_command_rewrites_before_builtin_dispatch(self):
+        runner, _adapter = make_restart_runner()
+        runner.config.quick_commands = {
+            "cy": {"type": "alias", "target": "model codex"}
+        }
+        runner._handle_model_command = AsyncMock(
+            side_effect=lambda event: f"model:{event.get_command_args().strip()}"
+        )
+
+        result = await runner._handle_message(self._make_real_event("/cy"))
+
+        assert result == "model:codex"
+        runner._handle_model_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_alias_command_matches_builtin_busy_session_behavior(self):
+        runner, _adapter = make_restart_runner()
+        runner.config.quick_commands = {
+            "cy": {"type": "alias", "target": "model codex"}
+        }
+        session_key = runner._session_key_for_source(
+            SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id="123",
+                chat_type="dm",
+                user_id="test_user",
+                user_name="Test User",
+            )
+        )
+        runner._running_agents[session_key] = MagicMock()
+        runner._running_agents_ts[session_key] = 0
+
+        result = await runner._handle_message(self._make_real_event("/cy"))
+
+        assert result is not None
+        assert "wait or /stop first" in result

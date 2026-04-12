@@ -2458,6 +2458,26 @@ class GatewayRunner:
                 label = response_text if len(response_text) <= 20 else response_text[:20] + "…"
                 return f"✓ Sent `{label}` to the update process."
 
+        if isinstance(self.config, dict):
+            quick_commands = self.config.get("quick_commands", {}) or {}
+        else:
+            quick_commands = getattr(self.config, "quick_commands", {}) or {}
+        if not isinstance(quick_commands, dict):
+            quick_commands = {}
+
+        # Rewrite alias quick commands before built-in command checks so they
+        # behave exactly like the target command, including busy-session
+        # bypasses such as /model or /new.
+        _initial_command = event.get_command()
+        if _initial_command and _initial_command in quick_commands:
+            _qcmd = quick_commands[_initial_command]
+            if _qcmd.get("type") == "alias":
+                target = _qcmd.get("target", "").strip()
+                if target:
+                    target = target if target.startswith("/") else f"/{target}"
+                    user_args = event.get_command_args().strip()
+                    event.text = f"{target} {user_args}".strip()
+
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
         # are handled with minimal latency.
@@ -2783,12 +2803,6 @@ class GatewayRunner:
 
         # User-defined quick commands (bypass agent loop, no LLM call)
         if command:
-            if isinstance(self.config, dict):
-                quick_commands = self.config.get("quick_commands", {}) or {}
-            else:
-                quick_commands = getattr(self.config, "quick_commands", {}) or {}
-            if not isinstance(quick_commands, dict):
-                quick_commands = {}
             if command in quick_commands:
                 qcmd = quick_commands[command]
                 if qcmd.get("type") == "exec":
@@ -2813,10 +2827,9 @@ class GatewayRunner:
                     target = qcmd.get("target", "").strip()
                     if target:
                         target = target if target.startswith("/") else f"/{target}"
-                        target_command = target.lstrip("/")
                         user_args = event.get_command_args().strip()
                         event.text = f"{target} {user_args}".strip()
-                        command = target_command
+                        command = event.get_command()
                         # Fall through to normal command dispatch below
                     else:
                         return f"Quick command '/{command}' has no target defined."
