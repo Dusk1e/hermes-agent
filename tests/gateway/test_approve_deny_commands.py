@@ -310,6 +310,40 @@ class TestDenyCommand:
 
 
 # ------------------------------------------------------------------
+# /stop command
+# ------------------------------------------------------------------
+
+
+class TestStopCommand:
+
+    def setup_method(self):
+        _clear_approval_state()
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_blocking_approval_without_running_agent(self):
+        """_handle_stop_command must also unblock a pending approval wait."""
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = build_session_key(source)
+        runner.session_store.get_or_create_session.return_value = SimpleNamespace(
+            session_key=session_key
+        )
+
+        entry = _ApprovalEntry({"command": "rm -rf /tmp/test"})
+        _gateway_queues[session_key] = [entry]
+
+        result = await runner._handle_stop_command(_make_event("/stop"))
+
+        assert "force-stopped" in result.lower()
+        assert "approval" in result.lower()
+        assert entry.event.is_set()
+        assert entry.result == "deny"
+        runner.session_store.suspend_session.assert_called_once_with(session_key)
+
+
+# ------------------------------------------------------------------
 # Bare "yes" must NOT trigger approval
 # ------------------------------------------------------------------
 

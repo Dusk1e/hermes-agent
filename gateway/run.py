@@ -2530,12 +2530,16 @@ class GatewayRunner:
             # /stop must hard-kill the session when an agent is running.
             # A soft interrupt (agent.interrupt()) doesn't help when the agent
             # is truly hung — the executor thread is blocked and never checks
-            # _interrupt_requested.  Force-clean _running_agents so the session
-            # is unlocked and subsequent messages are processed normally.
+            # _interrupt_requested. This also applies to gateway approval
+            # waits, where the agent thread is blocked on threading.Event.wait().
+            # Force-clean _running_agents so the session is unlocked and
+            # actively deny any blocked approvals so the executor thread can
+            # actually unwind.
             if _cmd_def_inner and _cmd_def_inner.name == "stop":
                 running_agent = self._running_agents.get(_quick_key)
                 if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
                     running_agent.interrupt("Stop requested")
+                self._cancel_blocking_gateway_approvals(_quick_key)
                 # Force-clean: remove the session lock regardless of agent state
                 adapter = self.adapters.get(source.platform)
                 if adapter and hasattr(adapter, 'get_pending_message'):
@@ -4100,6 +4104,22 @@ class GatewayRunner:
 
         return "\n".join(lines)
     
+    def _cancel_blocking_gateway_approvals(self, session_key: str) -> int:
+        """Resolve pending gateway approvals as denied so blocked threads exit."""
+        from tools.approval import resolve_gateway_approval
+
+        count = resolve_gateway_approval(session_key, "deny", resolve_all=True)
+        pending_approvals = getattr(self, "_pending_approvals", None)
+        if isinstance(pending_approvals, dict):
+            pending_approvals.pop(session_key, None)
+        if count:
+            logger.info(
+                "Cancelled %d pending gateway approval(s) for session %s during /stop",
+                count,
+                session_key[:20],
+            )
+        return count
+
     async def _handle_stop_command(self, event: MessageEvent) -> str:
         """Handle /stop command - interrupt a running agent.
 
@@ -4116,6 +4136,7 @@ class GatewayRunner:
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
+        cancelled_approvals = self._cancel_blocking_gateway_approvals(session_key)
 
         agent = self._running_agents.get(session_key)
         if agent is _AGENT_PENDING_SENTINEL:
@@ -4133,6 +4154,9 @@ class GatewayRunner:
                 del self._running_agents[session_key]
             self.session_store.suspend_session(session_key)
             return "⚡ Force-stopped. Your next message will start a fresh session."
+        if cancelled_approvals:
+            self.session_store.suspend_session(session_key)
+            return "⚡ Force-stopped. Pending approval was cancelled and the session will start fresh."
         else:
             return "No active task to stop."
 

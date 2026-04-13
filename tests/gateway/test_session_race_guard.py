@@ -293,6 +293,40 @@ async def test_stop_hard_kills_running_agent():
 
 
 # ------------------------------------------------------------------
+# Test 6bb: /stop also cancels blocking gateway approvals
+# ------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_stop_hard_kill_denies_blocking_gateway_approval():
+    """A hard /stop must unblock a pending gateway approval immediately."""
+    from tools import approval as approval_mod
+
+    runner = _make_runner()
+    session_key = build_session_key(
+        SessionSource(platform=Platform.TELEGRAM, chat_id="12345", chat_type="dm")
+    )
+
+    approval_mod._gateway_queues.clear()
+    approval_mod._gateway_notify_cbs.clear()
+
+    fake_agent = MagicMock()
+    runner._running_agents[session_key] = fake_agent
+    entry = approval_mod._ApprovalEntry({"command": "rm -rf /tmp/test"})
+    approval_mod._gateway_queues[session_key] = [entry]
+
+    try:
+        result = await runner._handle_message(_make_event(text="/stop"))
+    finally:
+        approval_mod._gateway_queues.clear()
+        approval_mod._gateway_notify_cbs.clear()
+
+    assert result is not None
+    assert "force-stopped" in result.lower()
+    assert entry.event.is_set(), "/stop must unblock the approval wait"
+    assert entry.result == "deny"
+    assert session_key not in approval_mod._gateway_queues
+
+
+# ------------------------------------------------------------------
 # Test 6c: /stop clears pending messages to prevent stale replays
 # ------------------------------------------------------------------
 @pytest.mark.asyncio
