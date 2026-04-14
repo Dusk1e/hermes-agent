@@ -257,6 +257,9 @@ class GatewayConfig:
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
 
+    # Optional Tailscale HTTPS proxy for the local API server.
+    tailscale_serve: bool = False
+
     def get_connected_platforms(self) -> List[Platform]:
         """Return list of platforms that are enabled and configured."""
         connected = []
@@ -353,6 +356,7 @@ class GatewayConfig:
             "thread_sessions_per_user": self.thread_sessions_per_user,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
+            "tailscale_serve": self.tailscale_serve,
         }
     
     @classmethod
@@ -399,6 +403,7 @@ class GatewayConfig:
             data.get("unauthorized_dm_behavior"),
             "pair",
         )
+        tailscale_serve = _coerce_bool(data.get("tailscale_serve"), False)
 
         return cls(
             platforms=platforms,
@@ -414,6 +419,7 @@ class GatewayConfig:
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
+            tailscale_serve=tailscale_serve,
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -504,6 +510,13 @@ def load_gateway_config() -> GatewayConfig:
                 gw_data["unauthorized_dm_behavior"] = _normalize_unauthorized_dm_behavior(
                     yaml_cfg.get("unauthorized_dm_behavior"),
                     "pair",
+                )
+
+            gateway_cfg = yaml_cfg.get("gateway")
+            if isinstance(gateway_cfg, dict) and "tailscale_serve" in gateway_cfg:
+                gw_data["tailscale_serve"] = _coerce_bool(
+                    gateway_cfg.get("tailscale_serve"),
+                    False,
                 )
 
             # Merge platforms section from config.yaml into gw_data so that

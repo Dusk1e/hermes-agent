@@ -459,7 +459,7 @@ class TestCustomProviderCompatibility:
             migrate_config(interactive=False, quiet=True)
             raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-        assert raw["_config_version"] == 17
+        assert raw["_config_version"] == 18
         assert raw["providers"]["openai-direct"] == {
             "api": "https://api.openai.com/v1",
             "api_key": "test-key",
@@ -477,7 +477,7 @@ class TestCustomProviderCompatibility:
         config_path.write_text(
             yaml.safe_dump(
                 {
-                    "_config_version": 17,
+                    "_config_version": 18,
                     "providers": {
                         "openai-direct": {
                             "api": "https://api.openai.com/v1",
@@ -506,7 +506,7 @@ class TestCustomProviderCompatibility:
         config_path.write_text(
             yaml.safe_dump(
                 {
-                    "_config_version": 17,
+                    "_config_version": 18,
                     "providers": {
                         "my-provider": {
                             "name": "My Provider",
@@ -537,7 +537,7 @@ class TestCustomProviderCompatibility:
         config_path.write_text(
             yaml.safe_dump(
                 {
-                    "_config_version": 17,
+                    "_config_version": 18,
                     "custom_providers": [
                         {
                             "name": "OpenAI Direct",
@@ -570,7 +570,7 @@ class TestCustomProviderCompatibility:
         config_path.write_text(
             yaml.safe_dump(
                 {
-                    "_config_version": 17,
+                    "_config_version": 18,
                     "custom_providers": [
                         {"name": "Ollama Cloud", "base_url": "https://ollama.com/v1", "model": "qwen3-coder"},
                         {"name": "Ollama Cloud", "base_url": "https://ollama.com/v1", "model": "glm-5.1"},
@@ -594,6 +594,7 @@ class TestInterimAssistantMessageConfig:
 
     def test_default_config_enables_interim_assistant_messages(self):
         assert DEFAULT_CONFIG["display"]["interim_assistant_messages"] is True
+        assert DEFAULT_CONFIG["gateway"]["tailscale_serve"] is False
 
     def test_migrate_to_v15_adds_interim_assistant_message_gate(self, tmp_path):
         config_path = tmp_path / "config.yaml"
@@ -606,6 +607,6 @@ class TestInterimAssistantMessageConfig:
             migrate_config(interactive=False, quiet=True)
             raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-        assert raw["_config_version"] == 17
+        assert raw["_config_version"] == 18
         assert raw["display"]["tool_progress"] == "off"
         assert raw["display"]["interim_assistant_messages"] is True

@@ -62,6 +62,43 @@ docker run -d -p 3000:8080 \
 
 Go to **http://localhost:3000**. Create your admin account (the first user becomes admin). You should see your agent in the model dropdown (named after your profile, or **hermes-agent** for the default profile). Start chatting!
 
+## Remote Access Over Tailscale
+
+If Tailscale is already installed and authenticated on the Hermes host, you can publish the local API server over your Tailnet without opening a public port.
+
+### One-shot for the current run
+
+```bash
+hermes gateway run --tailscale
+```
+
+Hermes will start the API server locally, then configure:
+
+```bash
+tailscale serve --bg --https=8642 http://127.0.0.1:8642
+```
+
+When Hermes stops, it turns that Tailscale Serve listener off again.
+
+### Persistent via config.yaml
+
+```yaml
+gateway:
+  tailscale_serve: true
+```
+
+Then start Hermes normally:
+
+```bash
+hermes gateway
+```
+
+Use `tailscale serve status` to see the published Tailnet URL. Point remote clients at `https://<your-device>:8642/v1`.
+
+:::warning
+Set `API_SERVER_KEY` before exposing the API server remotely. Tailscale limits access to your Tailnet, but Hermes still treats `API_SERVER_KEY` as the API authentication boundary.
+:::
+
 ## Docker Compose Setup
 
 For a more permanent setup, create a `docker-compose.yml`:
@@ -167,6 +204,7 @@ With streaming enabled (the default), you'll see brief inline indicators as tool
 | `API_SERVER_PORT` | `8642` | HTTP server port |
 | `API_SERVER_HOST` | `127.0.0.1` | Bind address |
 | `API_SERVER_KEY` | _(required)_ | Bearer token for auth. Match `OPENAI_API_KEY`. |
+| `gateway.tailscale_serve` | `false` | Publish the local API server over Tailscale Serve on the same port. |
 
 ### Open WebUI
 

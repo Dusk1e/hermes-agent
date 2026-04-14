@@ -4718,6 +4718,11 @@ For more help on a command:
                              help="Suppress all stderr log output")
     gateway_run.add_argument("--replace", action="store_true",
                              help="Replace any existing gateway instance (useful for systemd)")
+    gateway_run.add_argument(
+        "--tailscale",
+        action="store_true",
+        help="Expose the local API server over Tailscale Serve for this run",
+    )
     
     # gateway start
     gateway_start = gateway_subparsers.add_parser("start", help="Start the installed systemd/launchd background service")

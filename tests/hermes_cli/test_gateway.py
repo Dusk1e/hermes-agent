@@ -267,3 +267,27 @@ class TestWaitForGatewayExit:
 
         assert killed == 2
         assert calls == [(11, True), (22, True)]
+
+
+def test_gateway_run_passes_tailscale_flag(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        gateway,
+        "run_gateway",
+        lambda verbose, quiet=False, replace=False, tailscale=False: calls.append(
+            (verbose, quiet, replace, tailscale)
+        ),
+    )
+
+    gateway.gateway_command(
+        SimpleNamespace(
+            gateway_command="run",
+            verbose=2,
+            quiet=True,
+            replace=True,
+            tailscale=True,
+        )
+    )
+
+    assert calls == [(2, True, True, True)]

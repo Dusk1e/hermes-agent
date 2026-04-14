@@ -1537,7 +1537,12 @@ def launchd_status(deep: bool = False):
 # Gateway Runner
 # =============================================================================
 
-def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
+def run_gateway(
+    verbose: int = 0,
+    quiet: bool = False,
+    replace: bool = False,
+    tailscale: bool = False,
+):
     """Run the gateway in foreground.
     
     Args:
@@ -1546,6 +1551,8 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
         replace: If True, kill any existing gateway instance before starting.
                  This prevents systemd restart loops when the old process
                  hasn't fully exited yet.
+        tailscale: If True, expose the local API server over Tailscale Serve
+                   for this run.
     """
     sys.path.insert(0, str(PROJECT_ROOT))
     
@@ -1562,7 +1569,13 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
     # Exit with code 1 if gateway fails to connect any platform,
     # so systemd Restart=on-failure will retry on transient errors
     verbosity = None if quiet else verbose
-    success = asyncio.run(start_gateway(replace=replace, verbosity=verbosity))
+    success = asyncio.run(
+        start_gateway(
+            replace=replace,
+            verbosity=verbosity,
+            tailscale_serve=True if tailscale else None,
+        )
+    )
     if not success:
         sys.exit(1)
 
@@ -2764,7 +2777,8 @@ def gateway_command(args):
         verbose = getattr(args, 'verbose', 0)
         quiet = getattr(args, 'quiet', False)
         replace = getattr(args, 'replace', False)
-        run_gateway(verbose, quiet=quiet, replace=replace)
+        tailscale = getattr(args, 'tailscale', False)
+        run_gateway(verbose, quiet=quiet, replace=replace, tailscale=tailscale)
         return
 
     if subcmd == "setup":

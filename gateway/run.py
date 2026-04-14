@@ -19,6 +19,8 @@ import logging
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import signal
 import tempfile
@@ -531,9 +533,21 @@ class GatewayRunner:
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     
-    def __init__(self, config: Optional[GatewayConfig] = None):
+    def __init__(
+        self,
+        config: Optional[GatewayConfig] = None,
+        tailscale_serve: Optional[bool] = None,
+    ):
         self.config = config or load_gateway_config()
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
+        self._tailscale_serve_enabled = (
+            bool(tailscale_serve)
+            if tailscale_serve is not None
+            else bool(getattr(self.config, "tailscale_serve", False))
+        )
+        self._tailscale_serve_active = False
+        self._tailscale_serve_port: Optional[int] = None
+        self._tailscale_serve_url: Optional[str] = None
 
         # Load ephemeral config from config.yaml / env vars.
         # Both are injected at API-call time only and never persisted.
@@ -1266,6 +1280,160 @@ class GatewayRunner:
             return "all"
         return mode
 
+    def _get_api_server_tailscale_target(self) -> tuple[int, str] | None:
+        """Return the API server port and loopback target URL for Tailscale Serve."""
+        api_server = self.config.platforms.get(Platform.API_SERVER)
+        if not api_server or not api_server.enabled:
+            return None
+
+        extra = api_server.extra if isinstance(api_server.extra, dict) else {}
+        raw_port = extra.get("port", os.getenv("API_SERVER_PORT", "8642"))
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            port = 8642
+        return port, f"http://127.0.0.1:{port}"
+
+    @staticmethod
+    def _parse_tailscale_public_url(status_stdout: str, port: int) -> str | None:
+        """Best-effort Tailnet URL for operator logs."""
+        try:
+            data = json.loads(status_stdout or "{}")
+        except json.JSONDecodeError:
+            return None
+
+        dns_name = ""
+        self_info = data.get("Self")
+        if isinstance(self_info, dict):
+            dns_name = str(self_info.get("DNSName") or "").strip().rstrip(".")
+            if not dns_name:
+                host = str(self_info.get("HostName") or "").strip()
+                tailnet = data.get("CurrentTailnet")
+                if isinstance(tailnet, dict):
+                    suffix = str(tailnet.get("MagicDNSSuffix") or "").strip().lstrip(".")
+                    if host and suffix:
+                        dns_name = f"{host}.{suffix}"
+
+        if not dns_name:
+            return None
+        return f"https://{dns_name}:{port}"
+
+    def _run_tailscale_command(
+        self,
+        *args: str,
+        timeout: float = 20.0,
+    ) -> subprocess.CompletedProcess:
+        tailscale_bin = shutil.which("tailscale")
+        if not tailscale_bin:
+            raise FileNotFoundError("tailscale")
+        return subprocess.run(
+            [tailscale_bin, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    def _start_tailscale_serve(self) -> tuple[bool, str | None]:
+        """Configure Tailscale Serve for the local API server."""
+        target = self._get_api_server_tailscale_target()
+        if target is None:
+            return (
+                False,
+                "gateway.tailscale_serve requires the API server to be enabled "
+                "(set platforms.api_server.enabled or API_SERVER_ENABLED=true).",
+            )
+
+        port, backend_url = target
+
+        try:
+            status_result = self._run_tailscale_command("status", "--json")
+        except FileNotFoundError:
+            return (
+                False,
+                "gateway.tailscale_serve is enabled but the `tailscale` CLI was not found on PATH.",
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"Failed to query Tailscale status: {exc}"
+
+        if status_result.returncode != 0:
+            detail = (status_result.stderr or status_result.stdout or "").strip()
+            return (
+                False,
+                "Tailscale is not ready. Run `tailscale status` and make sure the "
+                f"machine is authenticated before starting Hermes. {detail}".strip(),
+            )
+
+        try:
+            serve_result = self._run_tailscale_command(
+                "serve",
+                "--bg",
+                f"--https={port}",
+                backend_url,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"Failed to configure Tailscale Serve: {exc}"
+
+        if serve_result.returncode != 0:
+            detail = (serve_result.stderr or serve_result.stdout or "").strip()
+            return False, f"Tailscale Serve failed: {detail or 'unknown error'}"
+
+        self._tailscale_serve_active = True
+        self._tailscale_serve_port = port
+        self._tailscale_serve_url = self._parse_tailscale_public_url(
+            status_result.stdout,
+            port,
+        )
+
+        api_server = self.config.platforms.get(Platform.API_SERVER)
+        extra = api_server.extra if api_server and isinstance(api_server.extra, dict) else {}
+        api_key = str(extra.get("key") or os.getenv("API_SERVER_KEY") or "").strip()
+        if not api_key:
+            logger.warning(
+                "Tailscale Serve is exposing the Hermes API server to your tailnet "
+                "without API_SERVER_KEY. Set API_SERVER_KEY before using remote clients."
+            )
+
+        logger.info(
+            "Tailscale Serve enabled on tailnet port %d -> %s",
+            port,
+            backend_url,
+        )
+        if self._tailscale_serve_url:
+            logger.info(
+                "Tailnet API endpoint: %s/v1",
+                self._tailscale_serve_url.rstrip("/"),
+            )
+        else:
+            logger.info(
+                "Tailnet API endpoint is active. Run `tailscale serve status` to inspect the published URL."
+            )
+        return True, None
+
+    def _stop_tailscale_serve(self) -> None:
+        """Disable the Tailscale Serve listener that Hermes started."""
+        if not self._tailscale_serve_active or self._tailscale_serve_port is None:
+            return
+
+        try:
+            result = self._run_tailscale_command(
+                "serve",
+                f"--https={self._tailscale_serve_port}",
+                "off",
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                logger.warning("Failed to disable Tailscale Serve: %s", detail or "unknown error")
+            else:
+                logger.info("Tailscale Serve disabled on tailnet port %d", self._tailscale_serve_port)
+        except FileNotFoundError:
+            logger.warning("tailscale CLI disappeared before Hermes could disable Tailscale Serve")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("Failed to disable Tailscale Serve: %s", exc)
+        finally:
+            self._tailscale_serve_active = False
+            self._tailscale_serve_port = None
+            self._tailscale_serve_url = None
+
     @staticmethod
     def _load_provider_routing() -> dict:
         """Load OpenRouter provider routing preferences from config.yaml."""
@@ -1557,6 +1725,20 @@ class GatewayRunner:
             except Exception as e:
                 logger.warning("Session suspension on startup failed: %s", e)
 
+        if self._tailscale_serve_enabled and self._get_api_server_tailscale_target() is None:
+            reason = (
+                "gateway.tailscale_serve requires the API server to be enabled "
+                "(set platforms.api_server.enabled or API_SERVER_ENABLED=true)."
+            )
+            logger.error(reason)
+            try:
+                from gateway.status import write_runtime_status
+                write_runtime_status(gateway_state="startup_failed", exit_reason=reason)
+            except Exception:
+                pass
+            self._request_clean_exit(reason)
+            return True
+
         connected_count = 0
         enabled_platform_count = 0
         startup_nonretryable_errors: list[str] = []
@@ -1681,6 +1863,35 @@ class GatewayRunner:
         
         # Update delivery router with adapters
         self.delivery_router.adapters = self.adapters
+
+        if self._tailscale_serve_enabled:
+            if Platform.API_SERVER not in self.adapters:
+                reason = (
+                    "gateway.tailscale_serve is enabled, but the API server did not "
+                    "start successfully. Fix the API server first, then retry."
+                )
+                logger.error(reason)
+                try:
+                    from gateway.status import write_runtime_status
+                    write_runtime_status(gateway_state="startup_failed", exit_reason=reason)
+                except Exception:
+                    pass
+                self._request_clean_exit(reason)
+                await self.stop()
+                return True
+
+            tailscale_ok, tailscale_error = self._start_tailscale_serve()
+            if not tailscale_ok:
+                reason = tailscale_error or "Failed to enable Tailscale Serve."
+                logger.error(reason)
+                try:
+                    from gateway.status import write_runtime_status
+                    write_runtime_status(gateway_state="startup_failed", exit_reason=reason)
+                except Exception:
+                    pass
+                self._request_clean_exit(reason)
+                await self.stop()
+                return True
         
         self._running = True
         self._update_runtime_status("running")
@@ -2050,6 +2261,8 @@ class GatewayRunner:
                     logger.info("✓ %s disconnected", platform.value)
                 except Exception as e:
                     logger.error("✗ %s disconnect error: %s", platform.value, e)
+
+            self._stop_tailscale_serve()
 
             for _task in list(self._background_tasks):
                 if _task is self._stop_task:
@@ -8787,7 +9000,12 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     logger.info("Cron ticker stopped")
 
 
-async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
+async def start_gateway(
+    config: Optional[GatewayConfig] = None,
+    replace: bool = False,
+    verbosity: Optional[int] = 0,
+    tailscale_serve: Optional[bool] = None,
+) -> bool:
     """
     Start the gateway and run until interrupted.
     
@@ -8899,7 +9117,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         if _stderr_level < logging.getLogger().level:
             logging.getLogger().setLevel(_stderr_level)
 
-    runner = GatewayRunner(config)
+    runner = GatewayRunner(config, tailscale_serve=tailscale_serve)
     
     # Set up signal handlers
     def shutdown_signal_handler():
