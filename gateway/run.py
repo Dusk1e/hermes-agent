@@ -532,19 +532,15 @@ class GatewayRunner:
     _restart_via_service: bool = False
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
+    _tailscale_serve_enabled: bool = False
+    _tailscale_serve_active: bool = False
+    _tailscale_serve_port: Optional[int] = None
+    _tailscale_serve_url: Optional[str] = None
     
-    def __init__(
-        self,
-        config: Optional[GatewayConfig] = None,
-        tailscale_serve: Optional[bool] = None,
-    ):
+    def __init__(self, config: Optional[GatewayConfig] = None):
         self.config = config or load_gateway_config()
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
-        self._tailscale_serve_enabled = (
-            bool(tailscale_serve)
-            if tailscale_serve is not None
-            else bool(getattr(self.config, "tailscale_serve", False))
-        )
+        self._tailscale_serve_enabled = bool(getattr(self.config, "tailscale_serve", False))
         self._tailscale_serve_active = False
         self._tailscale_serve_port: Optional[int] = None
         self._tailscale_serve_url: Optional[str] = None
@@ -1411,7 +1407,7 @@ class GatewayRunner:
 
     def _stop_tailscale_serve(self) -> None:
         """Disable the Tailscale Serve listener that Hermes started."""
-        if not self._tailscale_serve_active or self._tailscale_serve_port is None:
+        if not getattr(self, "_tailscale_serve_active", False) or getattr(self, "_tailscale_serve_port", None) is None:
             return
 
         try:
@@ -9117,7 +9113,9 @@ async def start_gateway(
         if _stderr_level < logging.getLogger().level:
             logging.getLogger().setLevel(_stderr_level)
 
-    runner = GatewayRunner(config, tailscale_serve=tailscale_serve)
+    runner = GatewayRunner(config)
+    if tailscale_serve is not None:
+        runner._tailscale_serve_enabled = bool(tailscale_serve)
     
     # Set up signal handlers
     def shutdown_signal_handler():
