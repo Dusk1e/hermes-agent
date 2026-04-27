@@ -435,6 +435,17 @@ class TestFTS5Search:
         sources = [r["source"] for r in results]
         assert all(s == "telegram" for s in sources)
 
+    def test_search_with_user_id_filter(self, db):
+        db.create_session(session_id="s1", source="telegram", user_id="user-a")
+        db.append_message("s1", role="user", content="Python question from user A")
+
+        db.create_session(session_id="s2", source="telegram", user_id="user-b")
+        db.append_message("s2", role="user", content="Python question from user B")
+
+        results = db.search_messages("Python", user_id_filter="user-a")
+        session_ids = {r["session_id"] for r in results}
+        assert session_ids == {"s1"}
+
     def test_search_default_sources_include_acp(self, db):
         db.create_session(session_id="s1", source="acp")
         db.append_message("s1", role="user", content="ACP question about Python")
@@ -1506,6 +1517,12 @@ class TestListSessionsRich:
         sessions = db.list_sessions_rich(source="cli")
         assert len(sessions) == 1
         assert sessions[0]["id"] == "s1"
+
+    def test_rich_list_user_id_filter(self, db):
+        db.create_session("s1", "telegram", user_id="user-a")
+        db.create_session("s2", "telegram", user_id="user-b")
+        sessions = db.list_sessions_rich(source="telegram", user_id_filter="user-a")
+        assert [session["id"] for session in sessions] == ["s1"]
 
     def test_preview_newlines_collapsed(self, db):
         db.create_session("s1", "cli")

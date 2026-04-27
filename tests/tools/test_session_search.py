@@ -242,6 +242,26 @@ class TestSessionSearchConcurrency:
 
 
 class TestRecentSessionListing:
+    def test_recent_sessions_are_scoped_to_active_gateway_user(self):
+        from unittest.mock import MagicMock
+
+        mock_db = MagicMock()
+        mock_db.list_sessions_rich.return_value = []
+
+        json.loads(_list_recent_sessions(
+            mock_db,
+            limit=5,
+            current_source="telegram",
+            current_user_id="user-a",
+        ))
+
+        mock_db.list_sessions_rich.assert_called_once_with(
+            source="telegram",
+            user_id_filter="user-a",
+            limit=10,
+            exclude_sources=list(_HIDDEN_SESSION_SOURCES),
+        )
+
     def test_current_child_session_excludes_root_lineage_even_when_child_id_is_longer(self):
         from unittest.mock import MagicMock
 
@@ -333,6 +353,31 @@ class TestSessionSearch:
         assert result["success"] is True
         assert result["count"] == 0
         assert result["results"] == []
+
+    def test_gateway_search_scopes_results_to_active_user(self):
+        from unittest.mock import MagicMock
+        from tools.session_search_tool import session_search
+
+        mock_db = MagicMock()
+        mock_db.search_messages.return_value = []
+
+        result = json.loads(session_search(
+            query="deploy",
+            db=mock_db,
+            current_source="telegram",
+            current_user_id="user-a",
+        ))
+
+        assert result["success"] is True
+        mock_db.search_messages.assert_called_once_with(
+            query="deploy",
+            source_filter=["telegram"],
+            user_id_filter="user-a",
+            role_filter=None,
+            exclude_sources=list(_HIDDEN_SESSION_SOURCES),
+            limit=50,
+            offset=0,
+        )
 
     def test_current_session_excluded_keeps_others(self):
         """Other sessions should still be returned when current is excluded."""

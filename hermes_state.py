@@ -803,6 +803,7 @@ class SessionDB:
     def list_sessions_rich(
         self,
         source: str = None,
+        user_id_filter: str = None,
         exclude_sources: List[str] = None,
         limit: int = 20,
         offset: int = 0,
@@ -848,6 +849,9 @@ class SessionDB:
         if source:
             where_clauses.append("s.source = ?")
             params.append(source)
+        if user_id_filter:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id_filter)
         if exclude_sources:
             placeholders = ",".join("?" for _ in exclude_sources)
             where_clauses.append(f"s.source NOT IN ({placeholders})")
@@ -1310,6 +1314,7 @@ class SessionDB:
         self,
         query: str,
         source_filter: List[str] = None,
+        user_id_filter: str = None,
         exclude_sources: List[str] = None,
         role_filter: List[str] = None,
         limit: int = 20,
@@ -1342,6 +1347,9 @@ class SessionDB:
             source_placeholders = ",".join("?" for _ in source_filter)
             where_clauses.append(f"s.source IN ({source_placeholders})")
             params.extend(source_filter)
+        if user_id_filter:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id_filter)
 
         if exclude_sources is not None:
             exclude_placeholders = ",".join("?" for _ in exclude_sources)
@@ -1397,6 +1405,9 @@ class SessionDB:
             if source_filter is not None:
                 like_where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
                 like_params.extend(source_filter)
+            if user_id_filter:
+                like_where.append("s.user_id = ?")
+                like_params.append(user_id_filter)
             if exclude_sources is not None:
                 like_where.append(f"s.source NOT IN ({','.join('?' for _ in exclude_sources)})")
                 like_params.extend(exclude_sources)

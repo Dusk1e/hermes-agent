@@ -8289,6 +8289,8 @@ class AIAgent:
                 limit=function_args.get("limit", 3),
                 db=self._session_db,
                 current_session_id=self.session_id,
+                current_source=self.platform if self._user_id and self.platform else None,
+                current_user_id=self._user_id,
             )
         elif function_name == "memory":
             target = function_args.get("target", "memory")
@@ -8801,6 +8803,8 @@ class AIAgent:
                         limit=function_args.get("limit", 3),
                         db=self._session_db,
                         current_session_id=self.session_id,
+                        current_source=self.platform if self._user_id and self.platform else None,
+                        current_user_id=self._user_id,
                     )
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
