@@ -2014,9 +2014,15 @@ def recompute_ready(conn: sqlite3.Connection) -> int:
                 "WHERE l.child_id = ?",
                 (task_id,),
             ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
+            parents_satisfied = all(
+                p["status"] in ("done", "archived") for p in parents
+            )
+            # A parent-free blocked task was intentionally blocked by a
+            # worker or operator. Only dependency-gated blocked tasks
+            # should auto-promote here when their parents clear.
+            if parents_satisfied and (cur_status != "blocked" or parents):
                 # Blocked tasks also get their failure counters reset —
-                # this is effectively an auto-unblock.
+                # this is effectively an auto-unblock for dependency waits.
                 if cur_status == "blocked":
                     conn.execute(
                         "UPDATE tasks SET status = 'ready', "

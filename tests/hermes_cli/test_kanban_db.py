@@ -192,6 +192,24 @@ def test_recompute_ready_promotes_blocked_with_done_parents(kanban_home):
         assert task.last_failure_error is None
 
 
+def test_recompute_ready_does_not_unblock_parent_free_manual_block(kanban_home):
+    """Parent-free blocked tasks must stay blocked until explicit unblock."""
+    with kb.connect() as conn:
+        blocked = kb.create_task(conn, title="blocked", assignee="a")
+        other = kb.create_task(conn, title="other", assignee="a")
+
+        kb.claim_task(conn, blocked)
+        assert kb.block_task(conn, blocked, reason="waiting on human")
+        assert kb.get_task(conn, blocked).status == "blocked"
+
+        # Unrelated board progress triggers recompute_ready internally.
+        kb.complete_task(conn, other, result="ok")
+
+        task = kb.get_task(conn, blocked)
+        assert task.status == "blocked"
+        assert task.consecutive_failures == 0
+
+
 def test_recompute_ready_fan_in_waits_for_all_parents(kanban_home):
     with kb.connect() as conn:
         a = kb.create_task(conn, title="a")
