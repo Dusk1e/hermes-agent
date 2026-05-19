@@ -2512,7 +2512,7 @@ def test_dispatch_review_dry_run(kanban_home, all_assignees_spawnable):
 def test_dispatch_review_spawns_with_correct_skills(
     kanban_home, all_assignees_spawnable,
 ):
-    """Review tasks get sdlc-review skill set before spawning."""
+    """Review dispatch preserves task skills and adds sdlc-review."""
     spawned_tasks = []
 
     def capture_spawn(task, workspace, board=None):
@@ -2520,12 +2520,17 @@ def test_dispatch_review_spawns_with_correct_skills(
         return 42  # fake PID
 
     with kb.connect() as conn:
-        t = kb.create_task(conn, title="review me", assignee="alice")
+        t = kb.create_task(
+            conn,
+            title="review me",
+            assignee="alice",
+            skills=["translation"],
+        )
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, spawn_fn=capture_spawn)
     assert len(res.spawned) == 1
     assert len(spawned_tasks) == 1
-    assert spawned_tasks[0].skills == ["sdlc-review"]
+    assert spawned_tasks[0].skills == ["translation", "sdlc-review"]
 
 
 def test_dispatch_review_skips_unassigned(kanban_home):

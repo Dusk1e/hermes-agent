@@ -4855,12 +4855,17 @@ def dispatch_once(
             continue
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
-        # Force-load sdlc-review skill for review agents.  The
-        # _default_spawn function already auto-loads kanban-worker, and
-        # appends task.skills via --skills.  Setting task.skills here
-        # means the review agent gets both kanban-worker (lifecycle)
-        # and sdlc-review (review logic: AC verification, merge, etc.).
-        claimed.skills = ["sdlc-review"]
+        # Force-load sdlc-review skill for review agents without
+        # dropping any task-level specialist skills already pinned on
+        # the task (e.g. translation, security-review). `_default_spawn`
+        # already auto-loads kanban-worker separately.
+        merged_skills: list[str] = []
+        for sk in (claimed.skills or []):
+            if sk and sk not in merged_skills:
+                merged_skills.append(sk)
+        if "sdlc-review" not in merged_skills:
+            merged_skills.append("sdlc-review")
+        claimed.skills = merged_skills
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             import inspect
