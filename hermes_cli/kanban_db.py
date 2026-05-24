@@ -1652,12 +1652,21 @@ def create_task(
 
     # Resolve workspace_path from board-level default_workdir when the
     # caller did not specify one explicitly.
+    #
+    # A board default points at an existing shared working directory
+    # (typically a repo checkout), not a per-task scratch root. If we
+    # only fill in ``workspace_path`` and leave ``workspace_kind`` as
+    # the default ``scratch``, task completion will treat that shared
+    # directory like an ephemeral scratch workspace and delete it. Make
+    # inherited board defaults explicit ``dir`` workspaces instead.
     if workspace_path is None:
         board_slug = board if board else get_current_board()
         board_meta = read_board_metadata(board_slug)
         board_default = board_meta.get("default_workdir")
         if board_default:
             workspace_path = str(board_default)
+            if workspace_kind == "scratch":
+                workspace_kind = "dir"
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):

@@ -2465,7 +2465,7 @@ def test_task_dict_survives_corrupt_created_at(tmp_path, monkeypatch):
 
 
 def test_create_task_without_workspace_inherits_board_default_workdir(kanban_home, monkeypatch):
-    """Board with default_workdir → create_task without workspace_path → inherits default."""
+    """Board default_workdir becomes an explicit shared-dir workspace."""
     default_wd = "/home/user/project"
     kb.create_board("work-proj", default_workdir=default_wd)
 
@@ -2473,6 +2473,7 @@ def test_create_task_without_workspace_inherits_board_default_workdir(kanban_hom
         tid = kb.create_task(conn, title="inherited", board="work-proj")
         t = kb.get_task(conn, tid)
     assert t is not None
+    assert t.workspace_kind == "dir"
     assert t.workspace_path == default_wd
 
 
@@ -2498,6 +2499,26 @@ def test_create_task_with_explicit_workspace_ignores_board_default(kanban_home):
     assert t is not None
     assert t.workspace_path == explicit
     assert t.workspace_path != "/board/default"
+
+
+def test_complete_task_preserves_inherited_board_default_workdir(kanban_home, tmp_path):
+    """Inherited board defaults must not be deleted as scratch workspaces."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    marker = repo / "keep.txt"
+    marker.write_text("important", encoding="utf-8")
+    kb.create_board("shared-dir-board", default_workdir=str(repo))
+
+    with kb.connect(board="shared-dir-board") as conn:
+        tid = kb.create_task(conn, title="preserve repo", board="shared-dir-board")
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.workspace_kind == "dir"
+        assert task.workspace_path == str(repo)
+        assert kb.complete_task(conn, tid, result="ok") is True
+
+    assert repo.exists(), "board default workdir was deleted on completion"
+    assert marker.exists(), "files inside board default workdir were deleted"
 
 
 # ---------------------------------------------------------------------------
