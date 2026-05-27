@@ -80,11 +80,11 @@ def _unauth_response(request: Request, *, reason: str) -> Response:
     proxied login page rather than the bare ``/login`` (which the
     proxy doesn't route to the dashboard).
     """
-    from hermes_cli.dashboard_auth.prefix import prefix_from_request
+    from hermes_cli.dashboard_auth.prefix import effective_prefix_from_request
 
     path = request.url.path
     next_param = _safe_next_target(request)
-    prefix = prefix_from_request(request)
+    prefix = effective_prefix_from_request(request)
     login_url = (
         f"{prefix}/login?next={next_param}" if next_param
         else f"{prefix}/login"
@@ -116,10 +116,14 @@ def _safe_next_target(request: Request) -> str:
     """Build the URL-encoded ``next`` query value, or empty string.
 
     Only same-origin relative paths are accepted; absolute URLs or
-    ``//evil.com`` open-redirect attempts are silently dropped. The empty
-    string return means the caller produces a bare ``/login`` URL — fine,
-    user lands at the dashboard root after re-auth.
+    ``//evil.com`` open-redirect attempts are silently dropped. The encoded
+    value uses the dashboard's PUBLIC path shape (``/hermes/sessions`` when
+    mounted under a prefix) so post-login redirects return the browser to the
+    externally-visible route rather than the backend's internal stripped path.
+    The empty string return means the caller produces a bare ``/login`` URL.
     """
+    from hermes_cli.dashboard_auth.prefix import effective_prefix_from_request
+
     path = request.url.path
     # Reject anything that doesn't start with "/" or starts with "//"
     # (protocol-relative URL — would open-redirect to an attacker host).
@@ -131,9 +135,11 @@ def _safe_next_target(request: Request) -> str:
         for p in ("/login", "/auth/", "/api/auth/")
     ):
         return ""
+    prefix = effective_prefix_from_request(request)
+    public_path = f"{prefix}{path}" if prefix else path
     # Preserve query string if present (e.g. /sessions?page=2).
     query = request.url.query
-    target = f"{path}?{query}" if query else path
+    target = f"{public_path}?{query}" if query else public_path
     # urlencode the whole thing as a single value.
     from urllib.parse import quote
     return quote(target, safe="")
@@ -199,8 +205,8 @@ async def gated_auth_middleware(
         # prefix so the deletion's Path matches the set-Path (otherwise
         # the browser ignores it).
         from hermes_cli.dashboard_auth.cookies import clear_session_cookies
-        from hermes_cli.dashboard_auth.prefix import prefix_from_request
-        clear_session_cookies(response, prefix=prefix_from_request(request))
+        from hermes_cli.dashboard_auth.prefix import effective_prefix_from_request
+        clear_session_cookies(response, prefix=effective_prefix_from_request(request))
         return response
 
     request.state.session = session

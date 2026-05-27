@@ -64,7 +64,9 @@ def prefix_from_request(request) -> str:
     """Convenience wrapper that reads the header off a Starlette/FastAPI
     Request and normalises it. Returns ``""`` when no prefix.
     """
-    return normalise_prefix(request.headers.get("x-forwarded-prefix"))
+    headers = getattr(request, "headers", None)
+    raw = headers.get("x-forwarded-prefix") if headers else ""
+    return normalise_prefix(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -155,3 +157,42 @@ def resolve_public_url() -> str:
         return env_clean
     cfg_raw = _load_dashboard_section().get("public_url", "")
     return _normalise_public_url(str(cfg_raw))
+
+
+def resolve_public_path_prefix() -> str:
+    """Return the path prefix baked into ``dashboard.public_url``.
+
+    ``https://example.com/hermes`` -> ``"/hermes"``
+    ``https://example.com``        -> ``""``
+
+    The path component is normalized through the same prefix validator used
+    for ``X-Forwarded-Prefix`` so every public-facing URL builder agrees on
+    what a safe mount prefix looks like.
+    """
+    public_url = resolve_public_url()
+    if not public_url:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(public_url)
+    except ValueError:
+        return ""
+    path = parsed.path or ""
+    if not path or path == "/":
+        return ""
+    return normalise_prefix(path)
+
+
+def effective_prefix_from_request(request) -> str:
+    """Resolve the public path prefix for outward-facing URLs.
+
+    Precedence:
+      1. The path baked into ``dashboard.public_url`` when configured.
+      2. ``X-Forwarded-Prefix`` from the active request.
+
+    This keeps the callback URL, login redirects, cookie Path attributes, and
+    SPA bootstrap/asset rewriting on the same canonical public mount.
+    """
+    public_prefix = resolve_public_path_prefix()
+    if public_prefix:
+        return public_prefix
+    return prefix_from_request(request)

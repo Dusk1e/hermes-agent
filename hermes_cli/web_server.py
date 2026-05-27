@@ -3843,8 +3843,9 @@ def mount_spa(application: FastAPI):
     def _serve_index(prefix: str = ""):
         """Return index.html with the session token + base-path injected.
 
-        ``prefix`` is the normalised ``X-Forwarded-Prefix`` (e.g. ``/hermes``)
-        or empty string when served at root.
+        ``prefix`` is the resolved public mount prefix (from
+        ``dashboard.public_url`` or ``X-Forwarded-Prefix``) or empty string
+        when served at root.
 
         When the OAuth auth gate is active (``app.state.auth_required``),
         the legacy ``_SESSION_TOKEN`` is NOT injected — the SPA reads
@@ -3901,7 +3902,9 @@ def mount_spa(application: FastAPI):
             WEB_DIST.resolve()
         ):
             return JSONResponse({"error": "not found"}, status_code=404)
-        prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
+        from hermes_cli.dashboard_auth.prefix import effective_prefix_from_request
+
+        prefix = effective_prefix_from_request(request)
         css = css_path.read_text()
         if prefix:
             for asset_dir in ("/fonts/", "/fonts-terminal/", "/ds-assets/", "/assets/"):
@@ -3914,7 +3917,9 @@ def mount_spa(application: FastAPI):
 
     @application.get("/{full_path:path}")
     async def serve_spa(full_path: str, request: Request):
-        prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
+        from hermes_cli.dashboard_auth.prefix import effective_prefix_from_request
+
+        prefix = effective_prefix_from_request(request)
         file_path = WEB_DIST / full_path
         # Prevent path traversal via url-encoded sequences (%2e%2e/)
         if (

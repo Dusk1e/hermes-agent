@@ -76,7 +76,7 @@ def _redirect_uri(request: Request) -> str:
     from urllib.parse import urlparse, urlunparse
 
     from hermes_cli.dashboard_auth.prefix import (
-        prefix_from_request,
+        effective_prefix_from_request,
         resolve_public_url,
     )
 
@@ -92,7 +92,7 @@ def _redirect_uri(request: Request) -> str:
     # Tier 2 + 3: reconstruct from the request URL, optionally with
     # X-Forwarded-Prefix layered on top of the path.
     base = str(request.url_for("auth_callback"))
-    prefix = prefix_from_request(request)
+    prefix = effective_prefix_from_request(request)
     if not prefix:
         return base
     parsed = urlparse(base)
@@ -114,8 +114,8 @@ def _prefix(request: Request) -> str:
     redirect builders (login_url construction). See
     ``hermes_cli.dashboard_auth.prefix`` for the normalisation rules.
     """
-    from hermes_cli.dashboard_auth.prefix import prefix_from_request
-    return prefix_from_request(request)
+    from hermes_cli.dashboard_auth.prefix import effective_prefix_from_request
+    return effective_prefix_from_request(request)
 
 
 # ---------------------------------------------------------------------------

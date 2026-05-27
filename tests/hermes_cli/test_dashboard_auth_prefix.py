@@ -36,6 +36,7 @@ import pytest
 # web_server.app.state.auth_required at module level.
 pytestmark = pytest.mark.xdist_group("dashboard_auth_app_state")
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hermes_cli import web_server
@@ -386,6 +387,109 @@ class TestPublicUrlOverride:
         patch_config("https://from-config.example")
         redirect_uri = self._redirect_uri(gated_app_direct)
         assert redirect_uri == "https://from-config.example/auth/callback"
+
+    def test_public_url_prefix_drives_login_redirects_and_next(
+        self, gated_app_direct, patch_config, monkeypatch
+    ):
+        """The public URL override must not stop at redirect_uri.
+
+        When the operator declares ``https://example.com/hermes``, every
+        outward-facing login URL must use that public mount and the
+        round-trip ``next=`` target must bring the browser back to the
+        same public path, not the backend's stripped ``/sessions`` path.
+        """
+        patch_config(None)
+        monkeypatch.setenv(
+            "HERMES_DASHBOARD_PUBLIC_URL", "https://example.com/hermes",
+        )
+
+        r_html = gated_app_direct.get("/sessions", follow_redirects=False)
+        assert r_html.status_code == 302
+        assert r_html.headers["location"] == (
+            "/hermes/login?next=%2Fhermes%2Fsessions"
+        )
+
+        r_api = gated_app_direct.get("/api/sessions?page=2", follow_redirects=False)
+        assert r_api.status_code == 401
+        body = r_api.json()
+        assert body["login_url"].startswith("/hermes/login")
+        assert "%2Fhermes%2Fapi%2Fsessions%3Fpage%3D2" in body["login_url"]
+
+    def test_public_url_prefix_round_trips_callback_landing(
+        self, gated_app_direct, patch_config, monkeypatch
+    ):
+        """The post-login redirect must land on the public path prefix."""
+        patch_config(None)
+        monkeypatch.setenv(
+            "HERMES_DASHBOARD_PUBLIC_URL", "https://example.com/hermes",
+        )
+
+        r1 = gated_app_direct.get(
+            "/auth/login?provider=stub&next=%2Fhermes%2Fsessions",
+            follow_redirects=False,
+        )
+        assert r1.status_code == 302
+        pkce_set = next(
+            c for c in r1.headers.get_list("set-cookie")
+            if "hermes_session_pkce" in c
+        )
+        pkce_kv = pkce_set.split(";", 1)[0]
+        state = r1.headers["location"].split("state=")[1]
+
+        r2 = gated_app_direct.get(
+            f"/auth/callback?code=stub_code&state={state}",
+            headers={"cookie": pkce_kv},
+            follow_redirects=False,
+        )
+        assert r2.status_code == 302
+        assert r2.headers["location"] == "/hermes/sessions"
+
+    def test_public_url_prefix_redirects_logout_and_bootstraps_spa(
+        self, gated_app_direct, patch_config, monkeypatch, tmp_path
+    ):
+        """Logout and SPA bootstrap should use the same public mount."""
+        patch_config(None)
+        monkeypatch.setenv(
+            "HERMES_DASHBOARD_PUBLIC_URL", "https://example.com/hermes",
+        )
+
+        r_logout = gated_app_direct.post("/auth/logout", follow_redirects=False)
+        assert r_logout.status_code == 302
+        assert r_logout.headers["location"] == "/hermes/login"
+
+        web_dist = tmp_path / "web_dist"
+        assets_dir = web_dist / "assets"
+        assets_dir.mkdir(parents=True)
+        (web_dist / "index.html").write_text(
+            (
+                "<html><head>"
+                '<link rel="stylesheet" href="/assets/app.css">'
+                "</head><body>"
+                '<script src="/assets/app.js"></script>'
+                "</body></html>"
+            ),
+            encoding="utf-8",
+        )
+        (assets_dir / "app.css").write_text("body{}", encoding="utf-8")
+        (assets_dir / "app.js").write_text("console.log('ok')", encoding="utf-8")
+
+        monkeypatch.setattr(web_server, "WEB_DIST", web_dist)
+        prev_required = getattr(web_server.app.state, "auth_required", None)
+        web_server.app.state.auth_required = False
+        try:
+            spa_app = FastAPI()
+            web_server.mount_spa(spa_app)
+            client = TestClient(
+                spa_app,
+                base_url="https://fly-app.fly.dev",
+            )
+            r_index = client.get("/")
+        finally:
+            web_server.app.state.auth_required = prev_required
+
+        assert r_index.status_code == 200
+        assert 'window.__HERMES_BASE_PATH__="/hermes"' in r_index.text
+        assert "/hermes/assets/" in r_index.text
 
 
 # ---------------------------------------------------------------------------
