@@ -15106,11 +15106,10 @@ class GatewayRunner:
         except Exception:
             out["tools.registry_generation"] = None
 
-        # Honcho identity-mapping keys live in honcho.json, not user_config.
-        # HonchoSessionManager freezes the resolved peer_name / ai_peer /
-        # pin / aliases / prefix at construction; without busting here,
-        # mid-flight honcho.json edits go unread until the next unrelated
-        # cache eviction.
+        # Honcho config lives in honcho.json, not user_config.
+        # HonchoSessionManager freezes this resolved subset at construction;
+        # without busting here, mid-flight honcho.json edits go unread until
+        # the next unrelated cache eviction.
         try:
             from plugins.memory.honcho.client import HonchoClientConfig
 
@@ -15121,12 +15120,34 @@ class GatewayRunner:
             out["honcho.runtime_peer_prefix"] = hcfg.runtime_peer_prefix or ""
             aliases = hcfg.user_peer_aliases or {}
             out["honcho.user_peer_aliases"] = sorted(aliases.items()) if isinstance(aliases, dict) else []
+            out["honcho.context_tokens"] = hcfg.context_tokens
+            out["honcho.write_frequency"] = hcfg.write_frequency
+            out["honcho.dialectic_reasoning_level"] = hcfg.dialectic_reasoning_level
+            out["honcho.dialectic_dynamic"] = bool(hcfg.dialectic_dynamic)
+            out["honcho.dialectic_max_chars"] = hcfg.dialectic_max_chars
+            out["honcho.user_observe_me"] = bool(hcfg.user_observe_me)
+            out["honcho.user_observe_others"] = bool(hcfg.user_observe_others)
+            out["honcho.ai_observe_me"] = bool(hcfg.ai_observe_me)
+            out["honcho.ai_observe_others"] = bool(hcfg.ai_observe_others)
+            out["honcho.message_max_chars"] = hcfg.message_max_chars
+            out["honcho.dialectic_max_input_chars"] = hcfg.dialectic_max_input_chars
         except Exception:
             out["honcho.peer_name"] = None
             out["honcho.ai_peer"] = None
             out["honcho.pin_peer_name"] = None
             out["honcho.runtime_peer_prefix"] = None
             out["honcho.user_peer_aliases"] = None
+            out["honcho.context_tokens"] = None
+            out["honcho.write_frequency"] = None
+            out["honcho.dialectic_reasoning_level"] = None
+            out["honcho.dialectic_dynamic"] = None
+            out["honcho.dialectic_max_chars"] = None
+            out["honcho.user_observe_me"] = None
+            out["honcho.user_observe_others"] = None
+            out["honcho.ai_observe_me"] = None
+            out["honcho.ai_observe_others"] = None
+            out["honcho.message_max_chars"] = None
+            out["honcho.dialectic_max_input_chars"] = None
 
         return out
 

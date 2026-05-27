@@ -817,6 +817,87 @@ class TestPinTransition:
 
         assert sig_before["honcho.ai_peer"] != sig_after["honcho.ai_peer"]
 
+    @pytest.mark.parametrize(
+        ("before_cfg", "after_cfg", "changed_keys"),
+        [
+            (
+                {"apiKey": "k", "peerName": "Igor", "contextTokens": 512},
+                {"apiKey": "k", "peerName": "Igor", "contextTokens": 1024},
+                ("honcho.context_tokens",),
+            ),
+            (
+                {"apiKey": "k", "peerName": "Igor", "writeFrequency": "async"},
+                {"apiKey": "k", "peerName": "Igor", "writeFrequency": "turn"},
+                ("honcho.write_frequency",),
+            ),
+            (
+                {"apiKey": "k", "peerName": "Igor", "dialecticReasoningLevel": "low"},
+                {"apiKey": "k", "peerName": "Igor", "dialecticReasoningLevel": "high"},
+                ("honcho.dialectic_reasoning_level",),
+            ),
+            (
+                {"apiKey": "k", "peerName": "Igor", "dialecticDynamic": True},
+                {"apiKey": "k", "peerName": "Igor", "dialecticDynamic": False},
+                ("honcho.dialectic_dynamic",),
+            ),
+            (
+                {"apiKey": "k", "peerName": "Igor", "dialecticMaxChars": 600},
+                {"apiKey": "k", "peerName": "Igor", "dialecticMaxChars": 1200},
+                ("honcho.dialectic_max_chars",),
+            ),
+            (
+                {"apiKey": "k", "peerName": "Igor", "observationMode": "directional"},
+                {"apiKey": "k", "peerName": "Igor", "observationMode": "unified"},
+                ("honcho.user_observe_others", "honcho.ai_observe_me"),
+            ),
+            (
+                {"apiKey": "k", "peerName": "Igor", "messageMaxChars": 25000},
+                {"apiKey": "k", "peerName": "Igor", "messageMaxChars": 4000},
+                ("honcho.message_max_chars",),
+            ),
+            (
+                {"apiKey": "k", "peerName": "Igor", "dialecticMaxInputChars": 10000},
+                {"apiKey": "k", "peerName": "Igor", "dialecticMaxInputChars": 800},
+                ("honcho.dialectic_max_input_chars",),
+            ),
+        ],
+    )
+    def test_cache_busting_signature_reflects_manager_scoped_settings(
+        self,
+        tmp_path,
+        monkeypatch,
+        before_cfg,
+        after_cfg,
+        changed_keys,
+    ):
+        """Gateway cache must bust when manager-scoped Honcho settings change."""
+        from gateway.run import GatewayRunner
+
+        cfg_path = tmp_path / "honcho.json"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        cfg_path.write_text(json.dumps(before_cfg))
+        cache_before = GatewayRunner._extract_cache_busting_config({})
+
+        cfg_path.write_text(json.dumps(after_cfg))
+        cache_after = GatewayRunner._extract_cache_busting_config({})
+
+        for key in changed_keys:
+            assert cache_before[key] != cache_after[key]
+
+        runtime = {
+            "api_key": "gateway-key",
+            "base_url": "https://example.test/v1",
+            "provider": "openrouter",
+        }
+        sig_before = GatewayRunner._agent_config_signature(
+            "claude-sonnet-4", runtime, ["hermes-telegram"], "", cache_keys=cache_before
+        )
+        sig_after = GatewayRunner._agent_config_signature(
+            "claude-sonnet-4", runtime, ["hermes-telegram"], "", cache_keys=cache_after
+        )
+        assert sig_before != sig_after
+
 
 class TestProfilePeerUniqueness:
     """Each Hermes profile can pin to its own unique peerName.
