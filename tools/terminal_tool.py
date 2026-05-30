@@ -1718,6 +1718,30 @@ def _resolve_notification_flag_conflict(
     return watch_patterns, ""
 
 
+def _resolve_command_cwd(
+    *,
+    workdir: Optional[str],
+    env: Any,
+    default_cwd: str,
+) -> str:
+    """Return the cwd for a command, preferring the live session cwd.
+
+    ``terminal_tool`` historically re-sent the init-time/config cwd on every
+    call. That broke session-local ``cd`` state: the environment tracked the
+    new directory in ``env.cwd``, but foreground/background calls kept forcing
+    the old cwd back through ``env.execute(..., cwd=...)``. Explicit
+    ``workdir=`` must still override everything.
+    """
+    if workdir:
+        return workdir
+
+    live_cwd = getattr(env, "cwd", None)
+    if isinstance(live_cwd, str) and live_cwd.strip():
+        return live_cwd
+
+    return default_cwd
+
+
 def terminal_tool(
     command: str,
     background: bool = False,
@@ -1990,7 +2014,11 @@ def terminal_tool(
             from tools.process_registry import process_registry
 
             session_key = get_current_session_key(default="")
-            effective_cwd = workdir or cwd
+            effective_cwd = _resolve_command_cwd(
+                workdir=workdir,
+                env=env,
+                default_cwd=cwd,
+            )
             try:
                 if env_type == "local":
                     proc_session = process_registry.spawn_local(
@@ -2207,7 +2235,11 @@ def terminal_tool(
                 try:
                     execute_kwargs = {
                         "timeout": effective_timeout,
-                        "cwd": workdir or cwd,
+                        "cwd": _resolve_command_cwd(
+                            workdir=workdir,
+                            env=env,
+                            default_cwd=cwd,
+                        ),
                     }
                     result = env.execute(command, **execute_kwargs)
                 except Exception as e:
