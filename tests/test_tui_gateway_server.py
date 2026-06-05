@@ -5694,3 +5694,62 @@ def test_notification_event_dedup_key_keeps_completions_one_shot():
     assert server._notification_event_dedup_key(first) == server._notification_event_dedup_key(
         replay
     )
+
+
+# ── Deleted-CWD tolerance (slash worker + path completion) ───────────
+
+
+def _raise_cwd_gone():
+    raise FileNotFoundError("[Errno 2] No such file or directory")
+
+
+def test_safe_getcwd_falls_back_when_cwd_deleted(monkeypatch, tmp_path):
+    """os.getcwd() raises FileNotFoundError on a deleted CWD; the helper must
+    fall back to TERMINAL_CWD, then the home directory."""
+    monkeypatch.setattr(server.os, "getcwd", _raise_cwd_gone)
+
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    assert server._safe_getcwd() == str(tmp_path)
+
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    monkeypatch.setattr(server.os.path, "expanduser", lambda p: str(tmp_path / "home"))
+    assert server._safe_getcwd() == str(tmp_path / "home")
+
+
+def test_completion_cwd_tolerates_deleted_cwd(monkeypatch, tmp_path):
+    """Path completion must not crash when the launch directory was removed
+    out from under the gateway mid-session."""
+    monkeypatch.setattr(server.os, "getcwd", _raise_cwd_gone)
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    monkeypatch.setattr(server.os.path, "expanduser", lambda p: str(tmp_path))
+
+    # No params, no session cwd, no TERMINAL_CWD → would have hit os.getcwd().
+    assert server._completion_cwd({}) == str(tmp_path)
+
+
+def test_slash_worker_tolerates_deleted_cwd(monkeypatch, tmp_path):
+    """The slash worker subprocess must launch from a safe cwd instead of
+    crashing when os.getcwd() raises on a deleted directory."""
+    monkeypatch.setattr(server.os, "getcwd", _raise_cwd_gone)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+
+    captured: dict[str, object] = {}
+
+    class _FakeProc:
+        stdout: list[str] = []
+        stderr: list[str] = []
+
+        def poll(self):
+            return None
+
+    def _fake_popen(argv, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+        return _FakeProc()
+
+    monkeypatch.setattr(server.subprocess, "Popen", _fake_popen)
+
+    worker = server._SlashWorker("sess", "model")
+    try:
+        assert captured["cwd"] == str(tmp_path)
+    finally:
+        worker.close()

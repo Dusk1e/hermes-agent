@@ -208,6 +208,21 @@ sys.stdout = sys.stderr
 _stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
 
 
+def _safe_getcwd() -> str:
+    """Return the current working directory, tolerating a deleted CWD.
+
+    ``os.getcwd()`` raises FileNotFoundError when the process's working
+    directory has been removed out from under it (e.g. a scratch workspace
+    cleaned up mid-session). Fall back to TERMINAL_CWD, then the user's home
+    directory, so the slash worker and path completion never crash on a stale
+    CWD. Mirrors ``tools.terminal_tool._safe_getcwd``.
+    """
+    try:
+        return os.getcwd()
+    except FileNotFoundError:
+        return os.getenv("TERMINAL_CWD") or os.path.expanduser("~")
+
+
 class _SlashWorker:
     """Persistent HermesCLI subprocess for slash commands."""
 
@@ -234,7 +249,7 @@ class _SlashWorker:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
-            cwd=os.getcwd(),
+            cwd=_safe_getcwd(),
             env=os.environ.copy(),
         )
         threading.Thread(target=self._drain_stdout, daemon=True).start()
@@ -793,7 +808,7 @@ def _completion_cwd(params: dict | None = None) -> str:
         (params or {}).get("cwd")
         or _sessions.get((params or {}).get("session_id") or "", {}).get("cwd")
         or os.environ.get("TERMINAL_CWD")
-        or os.getcwd()
+        or _safe_getcwd()
     )
     try:
         resolved = os.path.abspath(os.path.expanduser(str(raw)))
@@ -801,7 +816,7 @@ def _completion_cwd(params: dict | None = None) -> str:
             return resolved
     except Exception:
         pass
-    return os.getcwd()
+    return _safe_getcwd()
 
 
 def _git_branch_for_cwd(cwd: str) -> str:
