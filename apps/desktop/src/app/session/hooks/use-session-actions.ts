@@ -17,6 +17,7 @@ import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalize
 import {
   $currentCwd,
   $messages,
+  $sessionProfileHints,
   $sessions,
   $yoloActive,
   getRememberedWorkspaceCwd,
@@ -442,8 +443,10 @@ export function useSessionActions({
 
       // Swap the single live gateway to this session's profile before any
       // gateway call (no-op when it's already on that profile / single-profile).
+      // A cross-profile search hit may not be on the loaded list, so fall back
+      // to the profile hint search recorded for it.
       const storedForProfile = $sessions.get().find(session => session.id === storedSessionId)
-      const sessionProfile = storedForProfile?.profile
+      const sessionProfile = storedForProfile?.profile ?? $sessionProfileHints.get()[storedSessionId]
       await ensureGatewayProfile(sessionProfile)
 
       const cachedRuntimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)

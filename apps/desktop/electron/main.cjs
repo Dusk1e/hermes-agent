@@ -4847,6 +4847,7 @@ ipcMain.handle('hermes:requestMicrophoneAccess', async () => {
 // request.profile. Either way, a remote profile's session lives only on its
 // remote host, so the request must go there (where it serves its own state.db).
 //   GET    /api/profiles/sessions        → splice each remote profile's rows in
+//   GET    /api/profiles/sessions/search → fan the query out, splice remote hits
 //   GET    /api/sessions/{id}[/messages] → read from remote
 //   DELETE /api/sessions/{id}            → delete on remote
 //   PATCH  /api/sessions/{id}            → rename/archive on remote
@@ -4874,6 +4875,21 @@ async function interceptSessionRequestForRemote(request) {
       return profileHasRemoteOverride(requested) ? remoteSessionList(requested, searchParams) : undefined
     }
     return mergeRemoteProfileSessions(searchParams, remoteProfiles)
+  }
+
+  // Cross-profile session search. The primary only ever searches local
+  // profiles' state.db files, so a remote profile's hits would be missing —
+  // fan the query out to each remote host (mirrors the list path above).
+  if (method === 'GET' && pathname === '/api/profiles/sessions/search') {
+    const remoteProfiles = configuredRemoteProfileNames()
+    if (remoteProfiles.length === 0) {
+      return undefined // no remote profiles → primary fans out across local profiles
+    }
+    const requested = (searchParams.get('profile') || 'all').trim() || 'all'
+    if (requested !== 'all') {
+      return profileHasRemoteOverride(requested) ? remoteSessionSearch(requested, searchParams) : undefined
+    }
+    return mergeRemoteProfileSessionSearch(searchParams, remoteProfiles)
   }
 
   // Per-session read/mutation. Owner is in ?profile= (reads) or request.profile
@@ -4968,6 +4984,54 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
   const recency = s => s?.[order] ?? s?.started_at ?? 0
   merged.sort((a, b) => recency(b) - recency(a))
   return { ...base, sessions: merged.slice(offset, offset + limit), total, profile_totals: profileTotals }
+}
+
+// A remote profile's search hits, read from its remote host's single-profile
+// /api/sessions/search and tagged with the desktop-facing profile name. The
+// remote serves that profile as its own default db, so it needs no profile arg.
+async function remoteSessionSearch(profile, searchParams) {
+  const qs = new URLSearchParams()
+  qs.set('q', searchParams.get('q') || '')
+  const limit = searchParams.get('limit')
+  if (limit) qs.set('limit', limit)
+  const data = await fetchJsonForProfile(profile, `/api/sessions/search?${qs}`)
+  const results = Array.isArray(data?.results) ? data.results : []
+  for (const r of results) {
+    r.profile = profile
+    r.is_default_profile = false
+  }
+  return { results }
+}
+
+// Unified search: the primary's local cross-profile search, with each remote
+// profile's stale local hits dropped and the remote's real hits spliced in,
+// re-sorted by recency. Mirrors mergeRemoteProfileSessions — a dead remote
+// contributes nothing rather than breaking search.
+async function mergeRemoteProfileSessionSearch(searchParams, remoteProfiles) {
+  const limit = Math.max(1, Number(searchParams.get('limit')) || 20)
+
+  const primary = await ensureBackend(null)
+  const base = await fetchJson(`${primary.baseUrl}/api/profiles/sessions/search?${searchParams}`, primary.token, {
+    method: 'GET',
+    timeoutMs: DEFAULT_FETCH_TIMEOUT_MS
+  }).catch(() => ({ results: [] }))
+
+  const remoteSet = new Set(remoteProfiles)
+  const baseResults = Array.isArray(base?.results) ? base.results : []
+  const merged = baseResults.filter(r => !remoteSet.has(r?.profile))
+
+  await Promise.all(
+    remoteProfiles.map(async name => {
+      const list = await remoteSessionSearch(name, searchParams).catch(() => null)
+      if (list) {
+        merged.push(...list.results)
+      }
+    })
+  )
+
+  const recency = r => r?.session_started ?? 0
+  merged.sort((a, b) => recency(b) - recency(a))
+  return { results: merged.slice(0, limit) }
 }
 
 ipcMain.handle('hermes:api', async (_event, request) => {

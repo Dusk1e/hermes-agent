@@ -524,6 +524,78 @@ class TestWebServerEndpoints:
             for r in results
         )
 
+    def test_profile_search_spans_all_local_profiles(self):
+        """Cross-profile search surfaces hits from every local profile, each
+        tagged with its owning profile — not just the backend's own DB. This is
+        the parity the unified sidebar/command-center search relies on."""
+        from hermes_state import SessionDB
+        from hermes_constants import get_hermes_home
+
+        # Default profile owns one conversation.
+        db = SessionDB()
+        try:
+            db.create_session(session_id="default-hit", source="cli")
+            db.append_message(session_id="default-hit", role="user", content="alpha defaultneedle here")
+        finally:
+            db.close()
+
+        # A second (named) profile owns another, in its own on-disk state.db.
+        coder_home = get_hermes_home() / "profiles" / "coder"
+        coder_home.mkdir(parents=True, exist_ok=True)
+        coder_db = SessionDB(db_path=coder_home / "state.db")
+        try:
+            coder_db.create_session(session_id="coder-hit", source="cli")
+            coder_db.append_message(session_id="coder-hit", role="user", content="beta coderneedle here")
+        finally:
+            coder_db.close()
+
+        # The named profile's hit is invisible to the single-DB endpoint...
+        single = self.client.get("/api/sessions/search?q=coderneedle").json()["results"]
+        assert all(r["session_id"] != "coder-hit" for r in single)
+
+        # ...but the cross-profile endpoint finds it, tagged with its profile.
+        resp = self.client.get("/api/profiles/sessions/search?q=coderneedle")
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        hit = next(r for r in results if r["session_id"] == "coder-hit")
+        assert hit["profile"] == "coder"
+        assert hit["is_default_profile"] is False
+
+        # The default profile's hit is still found, tagged "default".
+        default_results = self.client.get("/api/profiles/sessions/search?q=defaultneedle").json()["results"]
+        default_hit = next(r for r in default_results if r["session_id"] == "default-hit")
+        assert default_hit["profile"] == "default"
+        assert default_hit["is_default_profile"] is True
+
+    def test_profile_search_scopes_to_named_profile(self):
+        """profile=<name> restricts the cross-profile search to that profile."""
+        from hermes_state import SessionDB
+        from hermes_constants import get_hermes_home
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="default-only", source="cli")
+            db.append_message(session_id="default-only", role="user", content="sharedneedle in default")
+        finally:
+            db.close()
+
+        coder_home = get_hermes_home() / "profiles" / "coder"
+        coder_home.mkdir(parents=True, exist_ok=True)
+        coder_db = SessionDB(db_path=coder_home / "state.db")
+        try:
+            coder_db.create_session(session_id="coder-only", source="cli")
+            coder_db.append_message(session_id="coder-only", role="user", content="sharedneedle in coder")
+        finally:
+            coder_db.close()
+
+        scoped = self.client.get(
+            "/api/profiles/sessions/search?q=sharedneedle&profile=coder"
+        ).json()["results"]
+        ids = {r["session_id"] for r in scoped}
+        assert "coder-only" in ids
+        assert "default-only" not in ids
+        assert all(r["profile"] == "coder" for r in scoped)
+
     def test_get_sessions_archived_is_boolean(self):
         from hermes_state import SessionDB
 

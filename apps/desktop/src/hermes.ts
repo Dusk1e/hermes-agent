@@ -182,9 +182,14 @@ export function setSessionArchived(id: string, archived: boolean, profile?: stri
   })
 }
 
+// Unified, cross-profile full-text search. Hits /api/profiles/sessions/search
+// so a result set spans every local profile (server-side fan-out) and every
+// remote profile (Electron splices each remote host's hits in) — matching the
+// "all sessions stay findable" promise of the unified session list. Each result
+// carries its owning `profile` so opening it resumes against the right backend.
 export function searchSessions(query: string): Promise<SessionSearchResponse> {
   return window.hermesDesktop.api<SessionSearchResponse>({
-    path: `/api/sessions/search?q=${encodeURIComponent(query)}`
+    path: `/api/profiles/sessions/search?q=${encodeURIComponent(query)}`
   })
 }
 

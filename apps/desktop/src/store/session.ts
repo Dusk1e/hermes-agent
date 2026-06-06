@@ -82,6 +82,12 @@ export const $sessionsTotal = atom<number>(0)
 // one. Empty for single-profile users (fall back to $sessionsTotal).
 export const $sessionProfileTotals = atom<Record<string, number>>({})
 export const $sessionsLoading = atom(true)
+// Owning profile for sessions surfaced by cross-profile search but absent from
+// the loaded $sessions list. resumeSession() consults this so clicking a search
+// hit in another profile resumes against that profile's backend instead of the
+// current one. Keyed by the live tip id. Single-profile users only ever see
+// "default", which resumeSession treats as a no-op swap.
+export const $sessionProfileHints = atom<Record<string, string>>({})
 export const $workingSessionIds = atom<string[]>([])
 export const $activeSessionId = atom<string | null>(null)
 export const $selectedStoredSessionId = atom<string | null>(null)
@@ -225,6 +231,28 @@ export const setAttentionSessionIds = (next: Updater<string[]>) => updateAtom($a
 export function setSessionAttention(sessionId: string | null | undefined, needsInput: boolean) {
   if (sessionId) {
     toggleMembership(setAttentionSessionIds, sessionId, needsInput)
+  }
+}
+
+/** Record the owning profile of each cross-profile search hit so a later resume
+ *  of a session that never made it into the loaded list still routes to the
+ *  right backend. Only non-empty profiles are stored; ids are never dropped (the
+ *  map is tiny — id→profile strings). */
+export function rememberSessionProfileHints(
+  results: ReadonlyArray<{ profile?: null | string; session_id: string }>
+): void {
+  const additions: Record<string, string> = {}
+
+  for (const result of results) {
+    const profile = (result.profile ?? '').trim()
+
+    if (profile && result.session_id) {
+      additions[result.session_id] = profile
+    }
+  }
+
+  if (Object.keys(additions).length > 0) {
+    $sessionProfileHints.set({ ...$sessionProfileHints.get(), ...additions })
   }
 }
 

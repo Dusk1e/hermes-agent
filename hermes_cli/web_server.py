@@ -1742,9 +1742,8 @@ async def get_profiles_sessions(
     }
 
 
-@app.get("/api/sessions/search")
-async def search_sessions(q: str = "", limit: int = 20):
-    """Search sessions by ID plus full-text message content using FTS5.
+def _search_sessions_in_db(db, q: str, limit: int) -> List[Dict[str, Any]]:
+    """Search one ``SessionDB`` by ID plus full-text message content (FTS5).
 
     Direct session-id matches are surfaced first, then FTS message-content
     matches. Results are deduped by compression lineage, not by raw
@@ -1753,6 +1752,157 @@ async def search_sessions(q: str = "", limit: int = 20):
     logical chat can own many ``sessions`` rows that all match the same query.
     Branches also use ``parent_session_id``, but they are real alternate
     conversations; don't collapse branch-specific hits back into the parent.
+
+    The caller owns ``db`` (this never closes it). Shared by the single-profile
+    ``/api/sessions/search`` and the cross-profile
+    ``/api/profiles/sessions/search`` aggregator.
+    """
+    safe_limit = max(1, min(int(limit or 20), 100))
+
+    # Walk parent_session_id to the compression root, memoized so a
+    # chain of compression segments only costs one walk. We deliberately
+    # stop at branch/delegate edges: those sessions may diverge from the
+    # parent and should remain searchable on their own.
+    root_cache: dict = {}
+
+    def compression_root(session_id: str) -> str:
+        if not session_id:
+            return session_id
+        if session_id in root_cache:
+            return root_cache[session_id]
+        chain = []
+        cur = session_id
+        visited = set()
+        root = session_id
+        while cur and cur not in visited:
+            visited.add(cur)
+            chain.append(cur)
+            if cur in root_cache:
+                root = root_cache[cur]
+                break
+            try:
+                s = db.get_session(cur)
+            except Exception:
+                s = None
+            if not s:
+                root = cur
+                break
+            parent = s.get("parent_session_id") if isinstance(s, dict) else None
+            if not parent:
+                root = cur
+                break
+            try:
+                parent_session = db.get_session(parent)
+            except Exception:
+                parent_session = None
+            if not parent_session:
+                root = cur
+                break
+            parent_ended_at = parent_session.get("ended_at")
+            started_at = s.get("started_at")
+            is_compression_edge = (
+                parent_session.get("end_reason") == "compression"
+                and parent_ended_at is not None
+                and started_at is not None
+                and started_at >= parent_ended_at
+            )
+            if not is_compression_edge:
+                root = cur
+                break
+            cur = parent
+        for node in chain:
+            root_cache[node] = root
+        return root
+
+    tip_cache: dict = {}
+
+    def lineage_tip(root_id: str) -> str:
+        if root_id in tip_cache:
+            return tip_cache[root_id]
+        tip = root_id
+        try:
+            resolved = db.get_compression_tip(root_id)
+            if resolved:
+                tip = resolved
+        except Exception:
+            pass
+        tip_cache[root_id] = tip
+        return tip
+
+    # Both ID matches and content matches share one keyspace, keyed by
+    # compression lineage root, so an id-hit and a content-hit on the
+    # same logical conversation collapse to a single result. The first
+    # hit for a lineage wins; ID matches run first and take priority.
+    seen: dict = {}
+
+    def add_lineage_result(raw_sid: str, payload: dict) -> None:
+        if not raw_sid:
+            return
+        root = compression_root(raw_sid)
+        if root in seen or len(seen) >= safe_limit:
+            return
+        payload = dict(payload)
+        payload["session_id"] = lineage_tip(root)
+        payload["lineage_root"] = root
+        seen[root] = payload
+
+    # Direct ID matches first: users often paste a session id from CLI,
+    # logs, or another Hermes surface. FTS can't find those unless the
+    # id happens to appear in message text. search_sessions_by_id is
+    # SQL-bounded, so this stays cheap even with thousands of sessions.
+    for row in db.search_sessions_by_id(q, limit=safe_limit, include_archived=True):
+        sid = row.get("id")
+        preview = (row.get("preview") or "").strip()
+        snippet = preview or f"Session ID: {sid}"
+        add_lineage_result(
+            sid,
+            {
+                "snippet": snippet,
+                "role": None,
+                "source": row.get("source"),
+                "model": row.get("model"),
+                "session_started": row.get("started_at"),
+            },
+        )
+
+    # Auto-add prefix wildcards so partial words match
+    # e.g. "nimb" → "nimb*" matches "nimby"
+    # Preserve quoted phrases and existing wildcards as-is
+    import re
+    terms = []
+    for token in re.findall(r'"[^"]*"|\S+', q.strip()):
+        if token.startswith('"') or token.endswith("*"):
+            terms.append(token)
+        else:
+            terms.append(token + "*")
+    prefix_query = " ".join(terms)
+    # Over-fetch so lineage dedup can still surface `limit` distinct
+    # conversations even when several hits collapse onto one root.
+    fetch_limit = max(safe_limit * 5, 50)
+    matches = db.search_messages(query=prefix_query, limit=fetch_limit)
+
+    for m in matches:
+        if len(seen) >= safe_limit:
+            break
+        add_lineage_result(
+            m["session_id"],
+            {
+                "snippet": m.get("snippet", ""),
+                "role": m.get("role"),
+                "source": m.get("source"),
+                "model": m.get("model"),
+                "session_started": m.get("session_started"),
+            },
+        )
+    return list(seen.values())
+
+
+@app.get("/api/sessions/search")
+async def search_sessions(q: str = "", limit: int = 20):
+    """Search the current backend's sessions by ID + full-text content.
+
+    Single-profile surface (web dashboard, CLI). The desktop's unified,
+    cross-profile search uses ``/api/profiles/sessions/search`` instead.
     """
     if not q or not q.strip():
         return {"results": []}
@@ -1760,149 +1910,85 @@ async def search_sessions(q: str = "", limit: int = 20):
         from hermes_state import SessionDB
         db = SessionDB()
         try:
-            safe_limit = max(1, min(int(limit or 20), 100))
-
-            # Walk parent_session_id to the compression root, memoized so a
-            # chain of compression segments only costs one walk. We deliberately
-            # stop at branch/delegate edges: those sessions may diverge from the
-            # parent and should remain searchable on their own.
-            root_cache: dict = {}
-
-            def compression_root(session_id: str) -> str:
-                if not session_id:
-                    return session_id
-                if session_id in root_cache:
-                    return root_cache[session_id]
-                chain = []
-                cur = session_id
-                visited = set()
-                root = session_id
-                while cur and cur not in visited:
-                    visited.add(cur)
-                    chain.append(cur)
-                    if cur in root_cache:
-                        root = root_cache[cur]
-                        break
-                    try:
-                        s = db.get_session(cur)
-                    except Exception:
-                        s = None
-                    if not s:
-                        root = cur
-                        break
-                    parent = s.get("parent_session_id") if isinstance(s, dict) else None
-                    if not parent:
-                        root = cur
-                        break
-                    try:
-                        parent_session = db.get_session(parent)
-                    except Exception:
-                        parent_session = None
-                    if not parent_session:
-                        root = cur
-                        break
-                    parent_ended_at = parent_session.get("ended_at")
-                    started_at = s.get("started_at")
-                    is_compression_edge = (
-                        parent_session.get("end_reason") == "compression"
-                        and parent_ended_at is not None
-                        and started_at is not None
-                        and started_at >= parent_ended_at
-                    )
-                    if not is_compression_edge:
-                        root = cur
-                        break
-                    cur = parent
-                for node in chain:
-                    root_cache[node] = root
-                return root
-
-            tip_cache: dict = {}
-
-            def lineage_tip(root_id: str) -> str:
-                if root_id in tip_cache:
-                    return tip_cache[root_id]
-                tip = root_id
-                try:
-                    resolved = db.get_compression_tip(root_id)
-                    if resolved:
-                        tip = resolved
-                except Exception:
-                    pass
-                tip_cache[root_id] = tip
-                return tip
-
-            # Both ID matches and content matches share one keyspace, keyed by
-            # compression lineage root, so an id-hit and a content-hit on the
-            # same logical conversation collapse to a single result. The first
-            # hit for a lineage wins; ID matches run first and take priority.
-            seen: dict = {}
-
-            def add_lineage_result(raw_sid: str, payload: dict) -> None:
-                if not raw_sid:
-                    return
-                root = compression_root(raw_sid)
-                if root in seen or len(seen) >= safe_limit:
-                    return
-                payload = dict(payload)
-                payload["session_id"] = lineage_tip(root)
-                payload["lineage_root"] = root
-                seen[root] = payload
-
-            # Direct ID matches first: users often paste a session id from CLI,
-            # logs, or another Hermes surface. FTS can't find those unless the
-            # id happens to appear in message text. search_sessions_by_id is
-            # SQL-bounded, so this stays cheap even with thousands of sessions.
-            for row in db.search_sessions_by_id(q, limit=safe_limit, include_archived=True):
-                sid = row.get("id")
-                preview = (row.get("preview") or "").strip()
-                snippet = preview or f"Session ID: {sid}"
-                add_lineage_result(
-                    sid,
-                    {
-                        "snippet": snippet,
-                        "role": None,
-                        "source": row.get("source"),
-                        "model": row.get("model"),
-                        "session_started": row.get("started_at"),
-                    },
-                )
-
-            # Auto-add prefix wildcards so partial words match
-            # e.g. "nimb" → "nimb*" matches "nimby"
-            # Preserve quoted phrases and existing wildcards as-is
-            import re
-            terms = []
-            for token in re.findall(r'"[^"]*"|\S+', q.strip()):
-                if token.startswith('"') or token.endswith("*"):
-                    terms.append(token)
-                else:
-                    terms.append(token + "*")
-            prefix_query = " ".join(terms)
-            # Over-fetch so lineage dedup can still surface `limit` distinct
-            # conversations even when several hits collapse onto one root.
-            fetch_limit = max(safe_limit * 5, 50)
-            matches = db.search_messages(query=prefix_query, limit=fetch_limit)
-
-            for m in matches:
-                if len(seen) >= safe_limit:
-                    break
-                add_lineage_result(
-                    m["session_id"],
-                    {
-                        "snippet": m.get("snippet", ""),
-                        "role": m.get("role"),
-                        "source": m.get("source"),
-                        "model": m.get("model"),
-                        "session_started": m.get("session_started"),
-                    },
-                )
-            return {"results": list(seen.values())}
+            return {"results": _search_sessions_in_db(db, q, limit)}
         finally:
             db.close()
     except Exception:
         _log.exception("GET /api/sessions/search failed")
         raise HTTPException(status_code=500, detail="Search failed")
+
+
+@app.get("/api/profiles/sessions/search")
+async def search_profile_sessions(q: str = "", limit: int = 20, profile: str = "all"):
+    """Cross-profile sibling of ``/api/sessions/search``.
+
+    Mirrors ``/api/profiles/sessions``: opens each profile's ``state.db``
+    read-only and runs the same id + FTS search, tagging every hit with its
+    owning ``profile`` so the desktop's unified search finds sessions in any
+    *local* profile — not just the backend's own. Remote profiles are spliced
+    in by the desktop's Electron layer, which fans the query out to each remote
+    host's ``/api/sessions/search``. ``profile`` may name a single profile or
+    "all".
+
+    Intentionally process-light: like the list aggregator it reads each db from
+    disk rather than spawning a backend per profile. A single (default) profile
+    yields the same hits as ``/api/sessions/search``, tagged ``profile="default"``.
+    """
+    if not q or not q.strip():
+        return {"results": []}
+
+    from hermes_state import SessionDB
+    from hermes_cli import profiles as profiles_mod
+
+    targets: List[Tuple[str, Path]] = []
+    if profile and profile != "all":
+        name, home = _cron_profile_home(profile)
+        targets.append((name, home))
+    else:
+        try:
+            infos = profiles_mod.list_profiles()
+            targets = [(info.name, info.path) for info in infos]
+        except Exception:
+            _log.exception("GET /api/profiles/sessions/search: list_profiles failed")
+            targets = []
+        if not targets:
+            targets.append(("default", profiles_mod.get_profile_dir("default")))
+
+    safe_limit = max(1, min(int(limit or 20), 100))
+    merged: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+    contributing = 0
+    for name, home in targets:
+        db_path = Path(home) / "state.db"
+        if not db_path.exists():
+            continue
+        try:
+            # Read-only: runs on every keystroke-debounced search, so it must
+            # never write-lock another profile's live DB (see SessionDB
+            # read_only docstring).
+            db = SessionDB(db_path=db_path, read_only=True)
+        except Exception as exc:
+            errors.append({"profile": name, "error": str(exc)})
+            continue
+        try:
+            rows = _search_sessions_in_db(db, q, safe_limit)
+            for r in rows:
+                r["profile"] = name
+                r["is_default_profile"] = name == "default"
+            if rows:
+                contributing += 1
+            merged.extend(rows)
+        except Exception as exc:
+            errors.append({"profile": name, "error": str(exc)})
+        finally:
+            db.close()
+
+    # One contributing profile (the common default-only case): keep the native
+    # id-first / FTS-rank order. Across profiles, sort by recency so a busy
+    # profile can't bury another profile's hits past the limit.
+    if contributing > 1:
+        merged.sort(key=lambda r: r.get("session_started") or 0, reverse=True)
+    return {"results": merged[:safe_limit], "errors": errors}
 
 
 def _normalize_config_for_web(config: Dict[str, Any]) -> Dict[str, Any]:

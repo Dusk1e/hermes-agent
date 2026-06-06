@@ -330,6 +330,27 @@ class TestSessionLifecycle:
         finally:
             restored.close()
 
+    def test_read_only_open_supports_fts_search(self, tmp_path):
+        """A read-only attach (used by cross-profile search) must still serve
+        FTS5 content search. The index already exists, MATCH never writes, and
+        detecting the index is a plain SELECT — so search works without taking a
+        write lock on another profile's live DB."""
+        db_path = tmp_path / "state.db"
+        seeded = SessionDB(db_path=db_path)
+        try:
+            seeded.create_session(session_id="s1", source="cli")
+            seeded.append_message("s1", role="user", content="readonlyneedle in content")
+        finally:
+            seeded.close()
+
+        ro = SessionDB(db_path=db_path, read_only=True)
+        try:
+            assert ro._fts_enabled is True
+            hits = ro.search_messages("readonlyneedle")
+            assert [h["session_id"] for h in hits] == ["s1"]
+        finally:
+            ro.close()
+
 
 # =========================================================================
 # Message storage

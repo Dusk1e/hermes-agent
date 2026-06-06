@@ -71,6 +71,7 @@ import {
   $sessionsLoading,
   $sessionsTotal,
   $workingSessionIds,
+  rememberSessionProfileHints,
   sessionPinId
 } from '@/store/session'
 
@@ -166,11 +167,15 @@ function searchResultToSession(result: SessionSearchResult): SessionInfo {
     _lineage_root_id: result.lineage_root ?? null,
     input_tokens: 0,
     is_active: false,
+    is_default_profile: result.is_default_profile,
     last_active: ts,
     message_count: 0,
     model: result.model ?? null,
     output_tokens: 0,
     preview: result.snippet?.trim() || null,
+    // Carry the owning profile so a cross-profile hit (a session not on the
+    // loaded page) resumes against the right backend instead of the current one.
+    profile: result.profile,
     source: result.source ?? null,
     started_at: ts,
     title: null,
@@ -368,6 +373,7 @@ export function ChatSidebar({
       void searchSessions(trimmedQuery)
         .then(res => {
           if (!cancelled) {
+            rememberSessionProfileHints(res.results)
             setServerMatches(res.results)
           }
         })

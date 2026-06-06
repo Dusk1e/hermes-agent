@@ -546,6 +546,12 @@ export interface SessionSearchResult {
   session_started: number | null
   snippet: string
   source: string | null
+  /** Owning profile name, set by the cross-profile search aggregator
+   *  (`/api/profiles/sessions/search`). Absent on legacy single-profile
+   *  responses, which the UI treats as the default profile. */
+  profile?: string
+  /** True when {@link profile} is the default profile. */
+  is_default_profile?: boolean
 }
 
 export interface SessionSearchResponse {

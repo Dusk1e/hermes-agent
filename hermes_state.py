@@ -422,6 +422,21 @@ class SessionDB:
                     isolation_level=None,
                 )
                 self._conn.row_factory = sqlite3.Row
+                # Enable FTS reads for read-only consumers (cross-profile
+                # search). An FTS5 MATCH works fine on a ``mode=ro`` connection
+                # once the index is known to exist; detecting it is a plain
+                # SELECT against sqlite_master, so this still takes no write
+                # lock. Without this, search_messages() short-circuits to [] and
+                # cross-profile content search silently finds nothing.
+                try:
+                    self._fts_enabled = bool(
+                        self._conn.execute(
+                            "SELECT 1 FROM sqlite_master "
+                            "WHERE type = 'table' AND name = 'messages_fts'"
+                        ).fetchone()
+                    )
+                except sqlite3.Error:
+                    self._fts_enabled = False
                 return
 
             self.db_path.parent.mkdir(parents=True, exist_ok=True)

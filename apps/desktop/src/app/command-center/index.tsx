@@ -31,7 +31,7 @@ import { exportSession } from '@/lib/session-export'
 import { cn } from '@/lib/utils'
 import { upsertDesktopActionTask } from '@/store/activity'
 import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
-import { $sessions } from '@/store/session'
+import { $sessions, rememberSessionProfileHints } from '@/store/session'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
 import { useRouteEnumParam } from '../hooks/use-route-enum-param'
@@ -227,6 +227,8 @@ export function CommandCenterView({
         label: cc.providerSessions,
         search: async searchQuery => {
           const response = await searchSessions(searchQuery)
+
+          rememberSessionProfileHints(response.results)
 
           return response.results.map(result => {
             const { detail, title } = splitSessionSearchResult(result, sessionsById)
