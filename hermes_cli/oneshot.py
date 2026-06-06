@@ -255,7 +255,7 @@ def _run_agent(
     # other commands (keeps top-level CLI startup cheap).
     from hermes_cli.config import load_config
     from hermes_cli.models import detect_provider_for_model
-    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from hermes_cli.runtime_provider import resolve_runtime_provider, resolve_effective_max_tokens
     from hermes_cli.tools_config import _get_platform_tools
     from run_agent import AIAgent
 
@@ -338,6 +338,10 @@ def _run_agent(
         provider=runtime.get("provider"),
         api_mode=runtime.get("api_mode"),
         model=effective_model,
+        # Apply the same output-token precedence as interactive CLI and gateway
+        # (env > model.max_tokens > per-provider max_output_tokens) so a custom
+        # provider's cap isn't silently dropped in oneshot mode.
+        max_tokens=resolve_effective_max_tokens(runtime),
         enabled_toolsets=toolsets_list,
         quiet_mode=True,
         platform="cli",

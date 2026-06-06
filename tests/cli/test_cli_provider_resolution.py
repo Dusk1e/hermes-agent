@@ -200,6 +200,61 @@ def test_runtime_resolution_rebuilds_agent_on_routing_change(monkeypatch):
     assert shell.api_mode == "codex_responses"
 
 
+def test_ensure_runtime_credentials_applies_provider_max_output_tokens(monkeypatch):
+    """A custom provider's max_output_tokens caps CLI output when no global
+    model.max_tokens / HERMES_MAX_TOKENS is set — parity with the gateway
+    (#20741 covered the gateway; this covers interactive CLI)."""
+    cli = _import_cli()
+    monkeypatch.delenv("HERMES_MAX_TOKENS", raising=False)
+    # No documented global cap configured.
+    monkeypatch.setattr("hermes_cli.runtime_provider._get_model_config", lambda: {})
+
+    def _runtime_resolve(**kwargs):
+        return {
+            "provider": "custom",
+            "api_mode": "chat_completions",
+            "base_url": "http://localhost:11434/v1",
+            "api_key": "sk-test",
+            "source": "custom_provider:mylocal",
+            "max_output_tokens": 12000,
+        }
+
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", _runtime_resolve)
+    monkeypatch.setattr("hermes_cli.runtime_provider.format_runtime_provider_error", lambda exc: str(exc))
+
+    shell = cli.HermesCLI(model="glm-5.1", compact=True, max_turns=1)
+
+    assert shell._ensure_runtime_credentials() is True
+    assert shell.max_tokens == 12000
+
+
+def test_ensure_runtime_credentials_global_max_tokens_beats_provider_cap(monkeypatch):
+    """The documented global model.max_tokens wins over a per-provider cap."""
+    cli = _import_cli()
+    monkeypatch.delenv("HERMES_MAX_TOKENS", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider._get_model_config", lambda: {"max_tokens": 16384}
+    )
+
+    def _runtime_resolve(**kwargs):
+        return {
+            "provider": "custom",
+            "api_mode": "chat_completions",
+            "base_url": "http://localhost:11434/v1",
+            "api_key": "sk-test",
+            "source": "custom_provider:mylocal",
+            "max_output_tokens": 12000,
+        }
+
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", _runtime_resolve)
+    monkeypatch.setattr("hermes_cli.runtime_provider.format_runtime_provider_error", lambda exc: str(exc))
+
+    shell = cli.HermesCLI(model="glm-5.1", compact=True, max_turns=1)
+
+    assert shell._ensure_runtime_credentials() is True
+    assert shell.max_tokens == 16384
+
+
 def test_cli_turn_routing_uses_primary_when_disabled(monkeypatch):
     cli = _import_cli()
     shell = cli.HermesCLI(model="gpt-5", compact=True, max_turns=1)

@@ -478,8 +478,9 @@ def _lift_max_output_tokens(entry: Dict[str, Any], result: Dict[str, Any]) -> No
     """Propagate a per-provider output cap onto the resolved runtime dict.
 
     Accepts ``max_output_tokens`` or ``max_tokens`` on a ``custom_providers``
-    entry so a provider block can pin its own output limit. Gateway and CLI
-    map this onto ``AIAgent.max_tokens`` only when the top-level
+    entry so a provider block can pin its own output limit. The gateway, the
+    interactive CLI, and oneshot all map this onto ``AIAgent.max_tokens`` via
+    :func:`resolve_effective_max_tokens`, but only when the top-level
     ``model.max_tokens`` isn't set, so the documented global key still wins.
     """
     for _k in ("max_output_tokens", "max_tokens"):
@@ -487,6 +488,48 @@ def _lift_max_output_tokens(entry: Dict[str, Any], result: Dict[str, Any]) -> No
         if isinstance(_v, int) and _v > 0:
             result["max_output_tokens"] = _v
             return
+
+
+def resolve_effective_max_tokens(
+    runtime: Optional[Dict[str, Any]] = None,
+    *,
+    model_cfg: Optional[Dict[str, Any]] = None,
+) -> Optional[int]:
+    """Resolve the output-token cap for an AIAgent across all surfaces.
+
+    Single source of truth so the interactive CLI, oneshot, and the messaging
+    gateway cap output identically for the same config. Precedence, highest
+    first:
+
+        HERMES_MAX_TOKENS env  >  model.max_tokens  >
+        per-provider max_output_tokens  >  None
+
+    ``runtime`` is a resolved provider dict from :func:`resolve_runtime_provider`;
+    its ``max_output_tokens`` key (lifted from a ``providers`` / ``custom_providers``
+    entry by :func:`_lift_max_output_tokens`) is the per-provider fallback, used
+    only when no global cap is configured. Pass ``model_cfg`` to reuse an
+    already-loaded model config; otherwise it is read via ``_get_model_config()``.
+    """
+    env_value = os.environ.get("HERMES_MAX_TOKENS")
+    if env_value:
+        try:
+            return int(env_value)
+        except (ValueError, TypeError):
+            pass
+
+    if model_cfg is None:
+        model_cfg = _get_model_config()
+    if isinstance(model_cfg, dict):
+        configured = model_cfg.get("max_tokens")
+        if isinstance(configured, int) and not isinstance(configured, bool):
+            return configured
+
+    if isinstance(runtime, dict):
+        provider_cap = runtime.get("max_output_tokens")
+        if isinstance(provider_cap, int) and provider_cap > 0:
+            return provider_cap
+
+    return None
 
 
 def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, Any]]:

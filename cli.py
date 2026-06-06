@@ -4876,6 +4876,7 @@ class HermesCLI:
         from hermes_cli.runtime_provider import (
             resolve_runtime_provider,
             format_runtime_provider_error,
+            resolve_effective_max_tokens,
         )
 
         _primary_exc = None
@@ -4969,6 +4970,12 @@ class HermesCLI:
         self._provider_source = runtime.get("source")
         self.api_key = api_key
         self.base_url = base_url
+
+        # Honor a per-provider output cap (providers/custom_providers
+        # max_output_tokens) the same way the gateway does, so the same config
+        # caps output identically across surfaces. HERMES_MAX_TOKENS and the
+        # global model.max_tokens still take precedence (resolved first).
+        self.max_tokens = resolve_effective_max_tokens(runtime)
 
         # When a custom_provider entry carries an explicit `model` field,
         # use it as the effective model name.  Without this, running
